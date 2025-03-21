@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
-  "name": "GitHub Repo Downloader",
+  "name": "GitHub Directory Downloader",
   "version": "1.0",
-  "description": "Adds a button to directly download GitHub repositories.",
+  "description": "Adds a button to download specific directories from GitHub repositories.",
   "icons": {
     "48": "icon.png"
   },
-  "permissions": ["activeTab"],
+  "permissions": ["activeTab", "scripting"],
   "content_scripts": [
     {
       "matches": ["*://github.com/*/*"],
