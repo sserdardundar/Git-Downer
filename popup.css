@@ -1,0 +1,29 @@
+/* Basic styling */
+body {
+  font-family: Arial, sans-serif;
+  padding: 10px;
+  margin: 0;
+}
+
+#container {
+  position: relative;
+  width: 200px;
+  height: 100px;
+}
+
+#download-btn {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  background-color: #4caf50;
+  color: white;
+  border: none;
+  padding: 10px;
+  text-align: center;
+  cursor: pointer;
+}
+
+#download-btn:hover {
+  background-color: #45a049;
+}

@@ -1,17 +1,27 @@
 {
-  "manifest_version": 3,
-  "name": "GitHub Directory Downloader",
+  "manifest_version": 2,
+  "name": "GitHub Repo Downloader",
+  "description": "Download the current GitHub repository or subdirectory as a ZIP file.",
   "version": "1.0",
-  "description": "Adds a button to download specific directories from GitHub repositories.",
-  "icons": {
-    "48": "icon.png"
-  },
-  "permissions": ["activeTab", "scripting"],
+  "permissions": ["activeTab", "https://raw.githubusercontent.com/*"],
   "content_scripts": [
     {
-      "matches": ["*://github.com/*/*"],
-      "js": ["content.js"],
-      "css": ["styles.css"]
+      "matches": ["*://github.com/*"],
+      "js": ["contentScript.js"]
     }
-  ]
+  ],
+  "background": {
+    "scripts": ["background.js"],
+    "persistent": false
+  },
+  "web_accessible_resources": ["jszip.min.js"],
+  "browser_action": {
+    "default_popup": "popup.html",
+    "default_icon": "icon.png"
+  },
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
+  }
 }
