@@ -1,0 +1,17 @@
+{
+  "manifest_version": 3,
+  "name": "GitHub Repo Downloader",
+  "version": "1.0",
+  "description": "Adds a button to directly download GitHub repositories.",
+  "icons": {
+    "48": "icon.png"
+  },
+  "permissions": ["activeTab"],
+  "content_scripts": [
+    {
+      "matches": ["*://github.com/*/*"],
+      "js": ["content.js"],
+      "css": ["styles.css"]
+    }
+  ]
+}
