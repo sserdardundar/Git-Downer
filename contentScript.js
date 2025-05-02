@@ -151,99 +151,6 @@ async function downloadSubdirectory() {
 
     console.log(`Owner: ${owner}, Repo: ${repo}, Branch: ${branch}, Directory: ${directory}`);
 
-    // Send initial progress update
-    chrome.runtime.sendMessage({
-      action: "updateProgress",
-      message: "Finding files...",
-    });
-
-    // Find all files in the current directory
-    const files = [];
-    
-    // Use document.querySelector to get file rows
-    const fileRows = document.querySelectorAll('div[role="row"]');
-    console.log(`Found ${fileRows.length} file rows`);
-    
-    if (fileRows.length === 0) {
-      // Try alternative selectors if the modern ones don't work
-      const alternativeRows = document.querySelectorAll('.js-navigation-item');
-      console.log(`Found ${alternativeRows.length} alternative rows`);
-      
-      if (alternativeRows.length > 0) {
-        alternativeRows.forEach(row => {
-          if (row.querySelector('.up-tree')) return; // Skip parent directory
-          
-          const nameEl = row.querySelector('.js-navigation-open');
-          if (nameEl) {
-            const fileName = nameEl.textContent.trim();
-            const isDirectory = nameEl.getAttribute('href').includes('/tree/');
-            files.push({ name: fileName, isDirectory });
-            console.log(`Found file: ${fileName}, isDirectory: ${isDirectory}`);
-          }
-        });
-      }
-    } else {
-      // Process modern GitHub UI rows
-      fileRows.forEach(row => {
-        // Skip header row and parent directory
-        if (row.getAttribute('aria-labelledby') === 'files' || row.querySelector('[aria-label="parent directory"]')) return;
-        
-        // Get name from the row
-        const nameEl = row.querySelector('a[role="rowheader"] span');
-        if (nameEl) {
-          const fileName = nameEl.textContent.trim();
-          // Check if it's a directory by looking at the icon
-          const svgIcon = row.querySelector('svg[aria-label="Directory"], svg[aria-label="File"]');
-          const isDirectory = svgIcon && svgIcon.getAttribute('aria-label') === 'Directory';
-          
-          files.push({ name: fileName, isDirectory });
-          console.log(`Found file: ${fileName}, isDirectory: ${isDirectory}`);
-        }
-      });
-    }
-    
-    // If no files were found with the above methods, try one more method
-    if (files.length === 0) {
-      const fileLinks = document.querySelectorAll('a[href*="blob/"], a[href*="tree/"]');
-      console.log(`Found ${fileLinks.length} file links`);
-      
-      if (fileLinks.length > 0) {
-        fileLinks.forEach(link => {
-          const fileName = link.textContent.trim();
-          const isDirectory = link.getAttribute('href').includes('/tree/');
-          
-          // Skip links that aren't actually files (like "Go to file" buttons)
-          if (fileName && !fileName.includes('Go to') && !fileName.includes('github.com')) {
-            files.push({ name: fileName, isDirectory });
-            console.log(`Found file: ${fileName}, isDirectory: ${isDirectory}`);
-          }
-        });
-      }
-    }
-    
-    if (files.length === 0) {
-      throw new Error("No files found in this directory. Try refreshing the page.");
-    }
-
-    // Process files to add full paths
-    const processedFiles = files.map(file => ({
-      ...file,
-      fullPath: directory ? `${directory}/${file.name}` : file.name
-    }));
-    
-    // Filter out directories if needed
-    const filesToDownload = processedFiles.filter(file => !file.isDirectory);
-    
-    if (filesToDownload.length === 0) {
-      throw new Error("No files found to download - only directories were found");
-    }
-
-    // Update progress
-    chrome.runtime.sendMessage({
-      action: "updateProgress",
-      message: `Found ${filesToDownload.length} files to download...`,
-    });
-
     // Try to load JSZip library
     let JSZipClass = null;
     try {
@@ -251,31 +158,7 @@ async function downloadSubdirectory() {
       console.log("JSZip loaded successfully:", typeof JSZipClass);
     } catch (error) {
       console.error("Error loading JSZip:", error);
-      
-      // If JSZip fails to load, we'll download files individually
-      chrome.runtime.sendMessage({
-        action: "updateProgress",
-        message: "ZIP creation not available. Downloading files individually...",
-      });
-      
-      // Prepare file URLs and names
-      const fileUrls = filesToDownload.map(file => 
-        `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${file.fullPath}`
-      );
-      const fileNames = filesToDownload.map(file => file.name);
-      
-      // Download files individually
-      const success = await downloadWithoutJSZip(fileUrls, fileNames, directoryName);
-      
-      if (success) {
-        chrome.runtime.sendMessage({
-          action: "downloadComplete",
-          message: `Downloaded ${filesToDownload.length} files individually.`,
-        });
-        return { success: true, individual: true };
-      } else {
-        throw new Error("Failed to download files. Please try again.");
-      }
+      throw new Error("Failed to load JSZip library. Please try again.");
     }
     
     console.log("Creating new JSZip instance");
@@ -284,17 +167,421 @@ async function downloadSubdirectory() {
     if (!rootFolder) {
       throw new Error("Failed to create folder in ZIP file");
     }
+
+    // Process repo information for recursive functions
+    const repoInfo = { owner, repo, branch };
+
+    // Keep track of overall progress
+    let totalFiles = 0;
+    let processedItems = 0;
+    let completedFiles = 0;
+    let failedFiles = 0;
     
-    // Function to download a single file
-    async function downloadFile(file) {
+    // Function to get the content type from a URL
+    function getContentTypeFromUrl(url) {
+      if (url.includes('/tree/')) {
+        return 'dir';
+      } else if (url.includes('/blob/')) {
+        return 'file';
+      }
+      return 'unknown';
+    }
+    
+    // Function to convert a GitHub file URL to a raw content URL
+    function convertToRawUrl(url) {
+      return url
+        .replace('github.com', 'raw.githubusercontent.com')
+        .replace('/blob/', '/');
+    }
+    
+    // Function to get a correct API URL for a directory listing
+    function getDirectoryApiUrl(path, repoInfo) {
+      return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${path}?ref=${repoInfo.branch}`;
+    }
+    
+    // Main recursive directory processing function
+    async function processDirectoryRecursively(dirPath, zipFolder) {
+      console.log(`Processing directory: ${dirPath}`);
+      
+      chrome.runtime.sendMessage({
+        action: "updateProgress",
+        message: `Processing directory: ${dirPath || 'root'}`
+      });
+      
       try {
-        console.log(`Downloading: ${file.fullPath}`);
+        // Use GitHub API to get directory contents
+        const apiUrl = getDirectoryApiUrl(dirPath, repoInfo);
+        console.log(`Fetching directory contents from API: ${apiUrl}`);
         
-        // Try the first URL format
-        const rawUrl = `https://raw.githubusercontent.com/${owner}/${repo}/${branch}/${file.fullPath}`;
-        console.log("URL:", rawUrl);
+        const response = await fetch(apiUrl, {
+          headers: {
+            'Accept': 'application/vnd.github.v3+json'
+          }
+        });
         
-        let response = await fetch(rawUrl, {
+        if (!response.ok) {
+          console.error(`API error: ${response.status} ${response.statusText}`);
+          
+          // If API fails, fall back to HTML scraping from current page
+          if (!dirPath || dirPath === directory) {
+            console.log("Falling back to HTML scraping for current page");
+            return await processCurrentPageDirectory(dirPath, zipFolder);
+          } else {
+            // For subdirectories, fetch their pages for scraping
+            return await processDirectoryFromUrl(
+              `https://github.com/${repoInfo.owner}/${repoInfo.repo}/tree/${repoInfo.branch}/${dirPath}`,
+              dirPath, 
+              zipFolder
+            );
+          }
+        }
+        
+        const contents = await response.json();
+        console.log(`API returned ${contents.length} items for ${dirPath || 'root directory'}`);
+        
+        // Process each item
+        for (const item of contents) {
+          processedItems++;
+          console.log(`Processing ${item.type}: ${item.path} (${processedItems}/${contents.length})`);
+          
+          if (item.type === 'dir') {
+            // Create a folder for the directory
+            const folderName = item.name;
+            const subFolder = zipFolder.folder(folderName);
+            if (!subFolder) {
+              console.error(`Failed to create subfolder ${folderName}`);
+              continue;
+            }
+            
+            // Process subdirectory recursively
+            const subDirPath = dirPath ? `${dirPath}/${folderName}` : folderName;
+            await processDirectoryRecursively(subDirPath, subFolder);
+          } else if (item.type === 'file') {
+            // Download and add file to ZIP
+            totalFiles++;
+            
+            chrome.runtime.sendMessage({
+              action: "updateProgress",
+              message: `Downloading: ${item.name} (${completedFiles + 1} of ${totalFiles})`
+            });
+            
+            try {
+              const success = await downloadAndAddFile(item, zipFolder);
+              if (success) {
+                completedFiles++;
+              } else {
+                failedFiles++;
+              }
+            } catch (error) {
+              console.error(`Error downloading file ${item.name}:`, error);
+              failedFiles++;
+            }
+          }
+        }
+        
+        return contents.length;
+      } catch (error) {
+        console.error(`Error processing directory ${dirPath}:`, error);
+        // Fall back to HTML scraping if API fails
+        if (!dirPath || dirPath === directory) {
+          return await processCurrentPageDirectory(dirPath, zipFolder);
+        } else {
+          return await processDirectoryFromUrl(
+            `https://github.com/${repoInfo.owner}/${repoInfo.repo}/tree/${repoInfo.branch}/${dirPath}`,
+            dirPath,
+            zipFolder
+          );
+        }
+      }
+    }
+    
+    // Function to process the current page's directory
+    async function processCurrentPageDirectory(dirPath, zipFolder) {
+      console.log(`Processing current page directory: ${dirPath}`);
+      
+      // Find all files and directories in the current page
+      const entries = findFilesAndDirectoriesInCurrentPage();
+      console.log(`Found ${entries.length} entries in current page:`, entries);
+      
+      if (entries.length === 0) {
+        console.warn("No entries found in current page, this might be a GitHub UI change");
+        return 0;
+      }
+      
+      // Process each entry
+      let processedCount = 0;
+      for (const entry of entries) {
+        processedItems++;
+        
+        if (entry.isDirectory) {
+          // Create subfolder
+          const folderName = entry.name;
+          const subFolder = zipFolder.folder(folderName);
+          if (!subFolder) {
+            console.error(`Failed to create subfolder ${folderName}`);
+            continue;
+          }
+          
+          // Get subdirectory path
+          const subDirPath = dirPath ? `${dirPath}/${folderName}` : folderName;
+          console.log(`Processing subdirectory: ${subDirPath}, URL: ${entry.url}`);
+          
+          // Process subdirectory
+          try {
+            await processDirectoryFromUrl(entry.url, subDirPath, subFolder);
+            processedCount++;
+          } catch (error) {
+            console.error(`Error processing subdirectory ${subDirPath}:`, error);
+          }
+        } else {
+          // Add file to ZIP
+          totalFiles++;
+          processedCount++;
+          
+          chrome.runtime.sendMessage({
+            action: "updateProgress",
+            message: `Downloading: ${entry.name} (${completedFiles + 1} of ${totalFiles})`
+          });
+          
+          try {
+            const fileItem = {
+              name: entry.name,
+              path: dirPath ? `${dirPath}/${entry.name}` : entry.name,
+              download_url: entry.rawUrl
+            };
+            
+            const success = await downloadAndAddFile(fileItem, zipFolder);
+            if (success) {
+              completedFiles++;
+            } else {
+              failedFiles++;
+            }
+          } catch (error) {
+            console.error(`Error downloading file ${entry.name}:`, error);
+            failedFiles++;
+          }
+        }
+      }
+      
+      return processedCount;
+    }
+    
+    // Function to process a directory from its URL
+    async function processDirectoryFromUrl(url, dirPath, zipFolder) {
+      console.log(`Fetching directory page: ${url}`);
+      
+      try {
+        // Fetch the directory page
+        const response = await fetch(url);
+        if (!response.ok) {
+          throw new Error(`Failed to fetch directory page: ${response.status}`);
+        }
+        
+        const html = await response.text();
+        console.log(`Fetched HTML page for ${dirPath}, size: ${html.length} bytes`);
+        
+        // Parse the HTML
+        const parser = new DOMParser();
+        const doc = parser.parseFromString(html, 'text/html');
+        
+        // Find all files and directories in the fetched HTML
+        const entries = findFilesAndDirectoriesInHTML(doc, url);
+        console.log(`Found ${entries.length} entries in directory ${dirPath} HTML:`, entries);
+        
+        if (entries.length === 0) {
+          console.warn(`No entries found in ${dirPath}, this might be a GitHub UI change`);
+          return 0;
+        }
+        
+        // Process each entry
+        let processedCount = 0;
+        for (const entry of entries) {
+          processedItems++;
+          
+          if (entry.isDirectory) {
+            // Create subfolder
+            const folderName = entry.name;
+            const subFolder = zipFolder.folder(folderName);
+            if (!subFolder) {
+              console.error(`Failed to create subfolder ${folderName}`);
+              continue;
+            }
+            
+            // Get subdirectory path and process it
+            const subDirPath = `${dirPath}/${folderName}`;
+            try {
+              await processDirectoryFromUrl(entry.url, subDirPath, subFolder);
+              processedCount++;
+            } catch (error) {
+              console.error(`Error processing subdirectory ${subDirPath}:`, error);
+            }
+          } else {
+            // Add file to ZIP
+            totalFiles++;
+            processedCount++;
+            
+            chrome.runtime.sendMessage({
+              action: "updateProgress",
+              message: `Downloading: ${entry.name} (${completedFiles + 1} of ${totalFiles})`
+            });
+            
+            try {
+              const fileItem = {
+                name: entry.name,
+                path: `${dirPath}/${entry.name}`,
+                download_url: entry.rawUrl
+              };
+              
+              const success = await downloadAndAddFile(fileItem, zipFolder);
+              if (success) {
+                completedFiles++;
+              } else {
+                failedFiles++;
+              }
+            } catch (error) {
+              console.error(`Error downloading file ${entry.name}:`, error);
+              failedFiles++;
+            }
+          }
+        }
+        
+        return processedCount;
+      } catch (error) {
+        console.error(`Error fetching directory ${dirPath}:`, error);
+        return 0;
+      }
+    }
+    
+    // Function to find files and directories in the current page
+    function findFilesAndDirectoriesInCurrentPage() {
+      return findFilesAndDirectoriesInHTML(document, window.location.href);
+    }
+    
+    // Function to find files and directories in HTML content
+    function findFilesAndDirectoriesInHTML(doc, baseUrl) {
+      const entries = [];
+      const seenUrls = new Set(); // To avoid duplicates
+      
+      // Try different selectors to find files and directories
+      
+      // Method 1: Modern GitHub UI - div rows
+      const rowElements = doc.querySelectorAll('div[role="row"]');
+      console.log(`Found ${rowElements.length} row elements with role=row`);
+      
+      for (const row of rowElements) {
+        // Skip parent directory and header rows
+        if (row.querySelector('[aria-label="parent directory"]') || 
+            row.getAttribute('aria-labelledby') === 'files') {
+          continue;
+        }
+        
+        const nameEl = row.querySelector('a[role="rowheader"] span');
+        if (nameEl) {
+          const name = nameEl.textContent.trim();
+          const linkEl = row.querySelector('a[role="rowheader"]');
+          if (linkEl && name) {
+            const url = new URL(linkEl.href, baseUrl).href;
+            
+            // Skip if we've already processed this URL
+            if (seenUrls.has(url)) continue;
+            seenUrls.add(url);
+            
+            const svgIcon = row.querySelector('svg[aria-label="Directory"], svg[aria-label="File"]');
+            const isDirectory = svgIcon && svgIcon.getAttribute('aria-label') === 'Directory';
+            
+            const rawUrl = isDirectory ? url : convertToRawUrl(url);
+            
+            entries.push({
+              name,
+              isDirectory,
+              url,
+              rawUrl
+            });
+            
+            console.log(`Found entry (modern UI): ${name}, isDirectory: ${isDirectory}, URL: ${url}`);
+          }
+        }
+      }
+      
+      // Method 2: Classic GitHub UI - js-navigation-item
+      if (entries.length === 0) {
+        const navItems = doc.querySelectorAll('.js-navigation-item');
+        console.log(`Found ${navItems.length} navigation items`);
+        
+        for (const item of navItems) {
+          // Skip parent directory
+          if (item.classList.contains('up-tree')) continue;
+          
+          const linkEl = item.querySelector('.js-navigation-open, [data-testid="tree-entry-link"]');
+          if (linkEl) {
+            const name = linkEl.textContent.trim();
+            if (name) {
+              const url = new URL(linkEl.href, baseUrl).href;
+              
+              // Skip if we've already processed this URL
+              if (seenUrls.has(url)) continue;
+              seenUrls.add(url);
+              
+              const isDirectory = getContentTypeFromUrl(url) === 'dir';
+              const rawUrl = isDirectory ? url : convertToRawUrl(url);
+              
+              entries.push({
+                name,
+                isDirectory,
+                url,
+                rawUrl
+              });
+              
+              console.log(`Found entry (classic UI): ${name}, isDirectory: ${isDirectory}, URL: ${url}`);
+            }
+          }
+        }
+      }
+      
+      // Method 3: Raw links approach - for any GitHub version
+      if (entries.length === 0) {
+        const allLinks = doc.querySelectorAll('a[href*="/blob/"], a[href*="/tree/"]');
+        console.log(`Found ${allLinks.length} blob/tree links`);
+        
+        for (const link of allLinks) {
+          const name = link.textContent.trim();
+          const url = new URL(link.href, baseUrl).href;
+          
+          // Skip non-file links, GitHub UI buttons, etc.
+          if (!name || 
+              name.includes('Go to') || 
+              url.includes('/commit/') || 
+              url.includes('/find/') ||
+              url.includes('/search') ||
+              seenUrls.has(url)) {
+            continue;
+          }
+          
+          seenUrls.add(url);
+          const isDirectory = getContentTypeFromUrl(url) === 'dir';
+          const rawUrl = isDirectory ? url : convertToRawUrl(url);
+          
+          entries.push({
+            name,
+            isDirectory,
+            url,
+            rawUrl
+          });
+          
+          console.log(`Found entry (link approach): ${name}, isDirectory: ${isDirectory}, URL: ${url}`);
+        }
+      }
+      
+      return entries;
+    }
+    
+    // Function to download and add a file to the ZIP
+    async function downloadAndAddFile(fileItem, zipFolder) {
+      try {
+        console.log(`Downloading file: ${fileItem.path}, URL: ${fileItem.download_url}`);
+        
+        // Try to download the file
+        let response = await fetch(fileItem.download_url, {
           method: 'GET',
           cache: 'no-store',
           headers: {
@@ -302,73 +589,74 @@ async function downloadSubdirectory() {
           }
         });
         
-        // If that fails, try the alternate URL
+        // If direct download fails, try alternative methods
         if (!response.ok) {
-          console.log(`First download attempt failed with status ${response.status}, trying alternate URL`);
+          console.log(`First download attempt failed (${response.status}), trying alternative methods`);
           
-          const alternateUrl = `https://github.com/${owner}/${repo}/raw/${branch}/${file.fullPath}`;
-          console.log("Alternate URL:", alternateUrl);
+          // Try GitHub raw URL if we have a blob URL
+          if (fileItem.html_url || fileItem.url) {
+            const urlToConvert = fileItem.html_url || fileItem.url;
+            const rawUrl = convertToRawUrl(urlToConvert);
+            console.log(`Trying raw URL: ${rawUrl}`);
+            
+            response = await fetch(rawUrl, {
+              method: 'GET',
+              cache: 'no-store'
+            });
+          }
           
-          response = await fetch(alternateUrl, {
-            method: 'GET',
-            cache: 'no-store'
-          });
-          
+          // If that still fails, try GitHub's raw domain
           if (!response.ok) {
-            throw new Error(`Failed to download ${file.name}: Status ${response.status}`);
+            // Extract path components from the current item path
+            const pathParts = fileItem.path.split('/');
+            const fileName = pathParts.pop();
+            const dirPath = pathParts.join('/');
+            
+            const alternateUrl = `https://raw.githubusercontent.com/${repoInfo.owner}/${repoInfo.repo}/${repoInfo.branch}/${fileItem.path}`;
+            console.log(`Trying alternate raw URL: ${alternateUrl}`);
+            
+            response = await fetch(alternateUrl, {
+              method: 'GET',
+              cache: 'no-store'
+            });
+            
+            if (!response.ok) {
+              throw new Error(`Failed to download ${fileItem.name}: Status ${response.status}`);
+            }
           }
         }
         
-        // Get the file content as an array buffer
+        // Get the file content
         const content = await response.arrayBuffer();
-        console.log(`Downloaded ${file.name}, size: ${content.byteLength} bytes`);
+        console.log(`Downloaded ${fileItem.name}, size: ${content.byteLength} bytes`);
         
-        // Add file to the zip
-        rootFolder.file(file.name, content);
+        // Add file to the zip folder
+        zipFolder.file(fileItem.name, content);
         return true;
       } catch (error) {
-        console.error(`Error downloading ${file.name}:`, error);
+        console.error(`Error downloading ${fileItem.name}:`, error);
         return false;
       }
     }
+
+    // Send initial progress update
+    chrome.runtime.sendMessage({
+      action: "updateProgress",
+      message: "Finding files and directories...",
+    });
     
-    // Download all files sequentially
-    let completed = 0;
-    let failed = 0;
+    // Start the recursive directory processing
+    await processDirectoryRecursively(directory, rootFolder);
     
-    for (let i = 0; i < filesToDownload.length; i++) {
-      const file = filesToDownload[i];
-      
-      // Update progress
-      chrome.runtime.sendMessage({
-        action: "updateProgress",
-        message: `Downloading file ${i+1} of ${filesToDownload.length}: ${file.name}`,
-      });
-      
-      // Download the file
-      const success = await downloadFile(file);
-      
-      if (success) {
-        completed++;
-      } else {
-        failed++;
-      }
-      
-      // Update progress percentage
-      chrome.runtime.sendMessage({
-        action: "updateProgress",
-        message: `Downloaded ${completed} of ${filesToDownload.length} files (${failed} failed)`,
-      });
-    }
-    
-    if (completed === 0) {
-      throw new Error("Failed to download any files. Check console for error details.");
+    // Check if we found and processed any files
+    if (totalFiles === 0) {
+      throw new Error("No files found to download. Please check console for details.");
     }
     
     // Generate the zip file
     chrome.runtime.sendMessage({
       action: "updateProgress",
-      message: "Creating ZIP file...",
+      message: `Creating ZIP file with ${completedFiles} files...`,
     });
     
     console.log("Generating ZIP...");
@@ -407,10 +695,15 @@ async function downloadSubdirectory() {
     // Send completion message
     chrome.runtime.sendMessage({
       action: "downloadComplete",
-      message: `Download complete! ${completed} files downloaded${failed > 0 ? `, ${failed} files failed` : ''}`,
+      message: `Download complete! ${completedFiles} files downloaded${failedFiles > 0 ? `, ${failedFiles} files failed` : ''}`,
     });
 
-    return { success: true, filesDownloaded: completed, filesFailed: failed };
+    return { 
+      success: true, 
+      totalFiles,
+      filesDownloaded: completedFiles, 
+      filesFailed: failedFiles 
+    };
   } catch (error) {
     console.error("Download error:", error);
     chrome.runtime.sendMessage({
