@@ -1,20 +1,18 @@
 {
   "manifest_version": 3,
-  "name": "GitHub Repo Downloader",
-  "version": "1.0.0",
-  "description": "Download GitHub repositories or specific directories as ZIP files directly from the GitHub interface",
+  "name": "GitHub Repository Downloader",
+  "version": "1.2.0",
+  "description": "Download GitHub repositories or specific directories as ZIP files",
   "permissions": [
     "activeTab",
+    "storage",
+    "downloads",
     "scripting"
   ],
   "host_permissions": [
     "https://github.com/*",
-    "https://raw.githubusercontent.com/*",
     "https://api.github.com/*"
   ],
-  "background": {
-    "service_worker": "background.js"
-  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
@@ -28,16 +26,22 @@
     "48": "icon.png",
     "128": "icon.png"
   },
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
       "matches": ["https://github.com/*"],
-      "js": ["contentScript.js"]
+      "js": ["contentScript.js"],
+      "run_at": "document_idle"
     }
   ],
-  "web_accessible_resources": [
-    {
-      "resources": ["jszip.min.js"],
-      "matches": ["https://github.com/*"]
-    }
-  ]
+  "web_accessible_resources": [{
+    "resources": [
+      "download.html",
+      "FileSaver.min.js",
+      "jszip.min.js"
+    ],
+    "matches": ["https://github.com/*"]
+  }]
 }
