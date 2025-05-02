@@ -176,7 +176,6 @@ This extension:
 
 - [JSZip](https://stuk.github.io/jszip/) for ZIP file creation
 - [FileSaver.js](https://github.com/eligrey/FileSaver.js) for enhanced download capabilities
-- Icon designed by [Freepik](https://www.freepik.com/)
 
 ## License
 
