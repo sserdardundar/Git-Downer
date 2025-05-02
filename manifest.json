@@ -1,41 +1,43 @@
 {
   "manifest_version": 3,
   "name": "GitHub Repo Downloader",
-  "description": "Download GitHub repositories or specific subdirectories as ZIP files with a single click.",
-  "version": "1.0",
+  "version": "1.0.0",
+  "description": "Download GitHub repositories or specific directories as ZIP files directly from the GitHub interface",
   "permissions": [
-    "activeTab"
+    "activeTab",
+    "scripting"
   ],
   "host_permissions": [
-    "https://github.com/*", 
-    "https://api.github.com/*",
-    "https://raw.githubusercontent.com/*"
-  ],
-  "content_scripts": [
-    {
-      "matches": ["*://github.com/*"],
-      "js": ["contentScript.js"]
-    }
+    "https://github.com/*",
+    "https://raw.githubusercontent.com/*",
+    "https://api.github.com/*"
   ],
   "background": {
     "service_worker": "background.js"
   },
-  "web_accessible_resources": [{
-    "resources": ["jszip.min.js"],
-    "matches": ["*://github.com/*"]
-  }],
   "action": {
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon.png",
       "48": "icon.png",
       "128": "icon.png"
-    },
-    "default_title": "GitHub Repo Downloader"
+    }
   },
   "icons": {
     "16": "icon.png",
     "48": "icon.png",
     "128": "icon.png"
-  }
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://github.com/*"],
+      "js": ["contentScript.js"]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["jszip.min.js"],
+      "matches": ["https://github.com/*"]
+    }
+  ]
 }

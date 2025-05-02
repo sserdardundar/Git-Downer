@@ -224,7 +224,7 @@ async function downloadSubdirectory() {
     chrome.runtime.sendMessage({
       action: "updateProgress",
       message: "Starting download process...",
-    });
+    }).catch(error => console.warn("Message sending error:", error));
     
     // Get current path information
     const currentPath = window.location.pathname;
@@ -270,14 +270,72 @@ async function downloadSubdirectory() {
 
     console.log(`Owner: ${owner}, Repo: ${repo}, Branch: ${branch}, Directory: ${directory}`);
 
-    // Try to load JSZip library
+    // Check for GitHub's built-in download option first
+    try {
+      // Look for the "Download ZIP" button that GitHub provides
+      const downloadBtn = document.querySelector('a[data-testid="download-raw-button"], a[data-turbo-frame="archive-fragment"]');
+      
+      if (downloadBtn) {
+        console.log("GitHub's native download button found:", downloadBtn);
+        
+        chrome.runtime.sendMessage({
+          action: "updateProgress",
+          message: "Using GitHub's native download option...",
+        }).catch(error => console.warn("Message sending error:", error));
+        
+        // Click the download button to trigger GitHub's native download
+        downloadBtn.click();
+        
+        // Wait a bit and send completion message
+        setTimeout(() => {
+          chrome.runtime.sendMessage({
+            action: "downloadComplete",
+            message: "Download initiated using GitHub's native download feature!",
+          }).catch(error => console.warn("Message sending error:", error));
+        }, 2000);
+        
+        return { 
+          success: true, 
+          method: "github_native" 
+        };
+      }
+      
+      console.log("No GitHub native download button found, proceeding with custom download method");
+    } catch (error) {
+      console.error("Error checking for GitHub's download button:", error);
+      // Continue with our custom download method
+    }
+
+    // Try to load JSZip library with improved error handling
     let JSZipClass = null;
     try {
       JSZipClass = await loadJSZip();
       console.log("JSZip loaded successfully:", typeof JSZipClass);
     } catch (error) {
       console.error("Error loading JSZip:", error);
-      throw new Error("Failed to load JSZip library. Please try again.");
+      
+      // Try loading JSZip again with a different method
+      try {
+        console.log("Attempting alternative JSZip loading method...");
+        // Try to directly import JSZip from CDN if extension load fails
+        JSZipClass = await new Promise((resolve, reject) => {
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js';
+          script.onload = () => {
+            if (window.JSZip) {
+              resolve(window.JSZip);
+            } else {
+              reject(new Error("JSZip not found after loading from CDN"));
+            }
+          };
+          script.onerror = () => reject(new Error("Failed to load JSZip from CDN"));
+          document.body.appendChild(script);
+        });
+        console.log("JSZip loaded from CDN successfully:", typeof JSZipClass);
+      } catch (cdnError) {
+        console.error("All JSZip loading methods failed:", cdnError);
+        throw new Error("Could not load ZIP library. Please try reloading the page or reinstalling the extension.");
+      }
     }
     
     console.log("Creating new JSZip instance");
@@ -318,14 +376,73 @@ async function downloadSubdirectory() {
       return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${path}?ref=${repoInfo.branch}`;
     }
     
-    // Main recursive directory processing function
+    // Function to get archive download URL directly from GitHub
+    function getArchiveUrl(repoInfo, path = '') {
+      // For the root repository
+      if (!path) {
+        return `https://github.com/${repoInfo.owner}/${repoInfo.repo}/archive/refs/heads/${repoInfo.branch}.zip`;
+      }
+      
+      // For a subdirectory - use GitHub's SVN export (this is a technique used by tools like DownGit)
+      return `https://github.com/${repoInfo.owner}/${repoInfo.repo}/trunk/${path}`;
+    }
+    
+    // Try to download the directory directly using GitHub's archive feature
+    async function tryDirectDownload() {
+      try {
+        chrome.runtime.sendMessage({
+          action: "updateProgress",
+          message: "Attempting direct download from GitHub...",
+        }).catch(error => console.warn("Message sending error:", error));
+        
+        const archiveUrl = getArchiveUrl(repoInfo, directory);
+        console.log(`Trying direct download from: ${archiveUrl}`);
+        
+        // Create a download link and trigger it
+        const a = document.createElement('a');
+        a.href = archiveUrl;
+        a.download = `${directoryName}.zip`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        
+        chrome.runtime.sendMessage({
+          action: "downloadComplete",
+          message: "Direct download initiated from GitHub!",
+        }).catch(error => console.warn("Message sending error:", error));
+        
+        return true;
+      } catch (error) {
+        console.error("Direct download failed:", error);
+        return false;
+      }
+    }
+    
+    // Try direct download first
+    const directSuccess = await tryDirectDownload();
+    if (directSuccess) {
+      return { 
+        success: true, 
+        method: "direct_download" 
+      };
+    }
+    
+    // If direct download fails, fall back to the recursive method
+    console.log("Direct download failed or not available, falling back to recursive method");
+    
+    // Send a progress update with safer message sending (catches errors)
+    function sendProgressUpdate(message) {
+      chrome.runtime.sendMessage({
+        action: "updateProgress",
+        message: message,
+      }).catch(error => console.warn("Message sending error:", error));
+    }
+    
+    // Main recursive directory processing function with safer message sending
     async function processDirectoryRecursively(dirPath, zipFolder) {
       console.log(`Processing directory: ${dirPath}`);
       
-      chrome.runtime.sendMessage({
-        action: "updateProgress",
-        message: `Processing directory: ${dirPath || 'root'}`
-      });
+      sendProgressUpdate(`Processing directory: ${dirPath || 'root'}`);
       
       try {
         // Use GitHub API to get directory contents
@@ -379,10 +496,7 @@ async function downloadSubdirectory() {
             // Download and add file to ZIP
             totalFiles++;
             
-            chrome.runtime.sendMessage({
-              action: "updateProgress",
-              message: `Downloading: ${item.name} (${completedFiles + 1} of ${totalFiles})`
-            });
+            sendProgressUpdate(`Downloading: ${item.name} (${completedFiles + 1} of ${totalFiles})`);
             
             try {
               const success = await downloadAndAddFile(item, zipFolder);
@@ -457,10 +571,7 @@ async function downloadSubdirectory() {
           totalFiles++;
           processedCount++;
           
-          chrome.runtime.sendMessage({
-            action: "updateProgress",
-            message: `Downloading: ${entry.name} (${completedFiles + 1} of ${totalFiles})`
-          });
+          sendProgressUpdate(`Downloading: ${entry.name} (${completedFiles + 1} of ${totalFiles})`);
           
           try {
             const fileItem = {
@@ -539,10 +650,7 @@ async function downloadSubdirectory() {
             totalFiles++;
             processedCount++;
             
-            chrome.runtime.sendMessage({
-              action: "updateProgress",
-              message: `Downloading: ${entry.name} (${completedFiles + 1} of ${totalFiles})`
-            });
+            sendProgressUpdate(`Downloading: ${entry.name} (${completedFiles + 1} of ${totalFiles})`);
             
             try {
               const fileItem = {
@@ -759,10 +867,7 @@ async function downloadSubdirectory() {
     }
 
     // Send initial progress update
-    chrome.runtime.sendMessage({
-      action: "updateProgress",
-      message: "Finding files and directories...",
-    });
+    sendProgressUpdate("Finding files and directories...");
     
     // Start the recursive directory processing
     await processDirectoryRecursively(directory, rootFolder);
@@ -773,10 +878,7 @@ async function downloadSubdirectory() {
     }
     
     // Generate the zip file
-    chrome.runtime.sendMessage({
-      action: "updateProgress",
-      message: `Creating ZIP file with ${completedFiles} files...`,
-    });
+    sendProgressUpdate(`Creating ZIP file with ${completedFiles} files...`);
     
     console.log("Generating ZIP...");
     
@@ -790,32 +892,34 @@ async function downloadSubdirectory() {
     const zipBlob = await zip.generateAsync(zipOptions, metadata => {
       // Update progress every 10%
       if (metadata.percent % 10 === 0) {
-        chrome.runtime.sendMessage({
-          action: "updateProgress",
-          message: `Creating ZIP file: ${Math.round(metadata.percent)}% complete...`,
-        });
+        sendProgressUpdate(`Creating ZIP file: ${Math.round(metadata.percent)}% complete...`);
       }
     });
     
     console.log("ZIP generated, size:", zipBlob.size, "bytes");
     
-    // Download the zip file
-    const url = URL.createObjectURL(zipBlob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `${directoryName}.zip`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-    
-    console.log("Download triggered");
+    // Download the zip file with error handling
+    try {
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `${directoryName}.zip`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      console.log("Download triggered");
 
-    // Send completion message
-    chrome.runtime.sendMessage({
-      action: "downloadComplete",
-      message: `Download complete! ${completedFiles} files downloaded${failedFiles > 0 ? `, ${failedFiles} files failed` : ''}`,
-    });
+      // Send completion message with error handling
+      chrome.runtime.sendMessage({
+        action: "downloadComplete",
+        message: `Download complete! ${completedFiles} files downloaded${failedFiles > 0 ? `, ${failedFiles} files failed` : ''}`,
+      }).catch(error => console.warn("Message sending error:", error));
+    } catch (error) {
+      console.error("Error initiating download:", error);
+      throw new Error("Failed to download the ZIP file. Try again or check browser settings.");
+    }
 
     return { 
       success: true, 
@@ -825,10 +929,17 @@ async function downloadSubdirectory() {
     };
   } catch (error) {
     console.error("Download error:", error);
-    chrome.runtime.sendMessage({
-      action: "downloadError",
-      message: error.message || "An unknown error occurred",
-    });
+    
+    // Send error message with safer approach
+    try {
+      chrome.runtime.sendMessage({
+        action: "downloadError",
+        message: error.message || "An unknown error occurred",
+      }).catch(e => console.warn("Failed to send error message:", e));
+    } catch (msgError) {
+      console.error("Failed to send error via Chrome runtime:", msgError);
+    }
+    
     throw error;
   }
 }
