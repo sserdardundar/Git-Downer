@@ -10,6 +10,7 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 - **Directory Support**: Download specific subdirectories without having to clone the entire repository
 - **Recursive Downloads**: Automatically includes all subdirectories and their files in the download
 - **Progress Tracking**: Detailed progress information as files are downloaded and the ZIP is created
+- **CSP-Compliant**: Properly handles Content Security Policy restrictions with multiple loading methods
 - **Modern & Legacy UI Support**: Works with both the latest GitHub interface and older versions
 - **Fallback Methods**: Multiple download techniques ensure files are retrieved even if the primary method fails
 - **Error Recovery**: Continues downloading even if individual files fail
@@ -38,7 +39,7 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 1. Navigate to any GitHub repository or subdirectory
 2. Look for the "Download Repository" or "Download Directory" button in the GitHub navigation bar
 3. Click the button to start the download
-4. A progress indicator will appear in the extension popup
+4. A progress indicator will appear showing the download status
 5. The ZIP file will be downloaded automatically when complete
 
 ![Download Button](screenshots/download_button.png)
@@ -52,6 +53,17 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 5. The ZIP file will be downloaded automatically when complete
 
 ![Extension Popup](screenshots/popup.png)
+
+### Downloading Subdirectories
+
+The extension can download specific subdirectories rather than the entire repository:
+
+1. Navigate to the specific subdirectory within a GitHub repository
+2. The download button will change to "Download Directory"
+3. Click the button to download only that subdirectory and its contents
+4. The ZIP file will contain the correct directory structure with the subdirectory as the root
+
+This is especially useful for large repositories where you only need a small section.
 
 ## Customization
 
@@ -70,19 +82,34 @@ You can personalize the appearance of the extension through the settings page:
 
 ## How It Works
 
-- For full repositories: Uses GitHub's API and raw content URLs to gather files
-- For subdirectories: 
-  - Analyzes the page to find all files and subdirectories
+- **Repository Root Downloads**: 
+  - Uses GitHub's native download functionality when available
+  - Falls back to API and raw content URLs when needed
+  
+- **Subdirectory Downloads**: 
+  - Analyzes the directory structure using GitHub's API
   - Recursively traverses all subdirectories
   - Downloads each file individually
-  - Packages everything into a ZIP file with the correct directory structure
-- The extension intelligently handles different GitHub UI versions and adapts its file detection methods accordingly
+  - Preserves the correct directory structure
+  - Packages everything into a ZIP file with the subdirectory as the root
+  
+- **Multiple Download Methods**:
+  - Direct download via createObjectURL and download attribute
+  - Chrome Download API for reliable downloading
+  - Dedicated download page for handling larger files
+  - Individual file downloading as a last resort
+
+- **CSP-Compliant Architecture**:
+  - Uses Chrome's scripting API to properly inject the JSZip library
+  - Multiple fallback mechanisms for script loading
+  - Background service worker handles secure script injection
 
 ## Technical Details
 
 - Built with vanilla JavaScript
 - Uses the JSZip library for ZIP file creation
 - Implements multiple fallback strategies for reliable downloads
+- Chrome's Scripting API for CSP-compliant code execution
 - Uses GitHub's API when possible for better performance
 - Falls back to HTML parsing when the API is unavailable
 - Supports modern and legacy GitHub interfaces
@@ -95,9 +122,11 @@ You can personalize the appearance of the extension through the settings page:
 
 ## Troubleshooting
 
+- **Content Security Policy errors**: The extension has multiple fallback methods for script injection
 - **Download fails with no files**: Make sure you have access to the repository (private repositories require login)
 - **Missing files**: Try refreshing the page before downloading
 - **API rate limits**: If you encounter GitHub API rate limits, wait a few minutes and try again
+- **Large repositories**: For very large repositories, the extension may take longer to process files
 
 ## Privacy
 
