@@ -93,6 +93,103 @@ async function downloadWithoutJSZip(fileUrls, fileNames, zipName) {
   }
 }
 
+// Function to add download button to GitHub UI
+function addDownloadButtonToUI() {
+  // Check if we're on a GitHub repository page
+  const pathParts = window.location.pathname.split('/');
+  if (pathParts.length < 3) {
+    return; // Not a repository page
+  }
+  
+  const isRepoPage = pathParts.length >= 3 && 
+                     !['settings', 'search', 'marketplace', 'explore'].includes(pathParts[1]);
+  
+  if (!isRepoPage) {
+    return;
+  }
+  
+  console.log("Adding download button to GitHub UI");
+  
+  // Find the repository navigation bar
+  const navBar = document.querySelector('nav[aria-label="Repository"], .pagehead-actions, ul.UnderlineNav-body');
+  if (!navBar) {
+    console.log("Repository navigation bar not found");
+    return;
+  }
+  
+  // Check if button already exists
+  if (document.getElementById('github-repo-downloader-btn')) {
+    return;
+  }
+  
+  // Create the download button
+  const downloadButton = document.createElement('li');
+  downloadButton.className = 'UnderlineNav-item d-flex';
+  downloadButton.id = 'github-repo-downloader-btn';
+  downloadButton.style.marginLeft = '8px';
+  
+  const isTreeView = window.location.pathname.includes('/tree/');
+  const buttonText = isTreeView ? 'Download Directory' : 'Download Repository';
+  
+  // Modern GitHub UI (2023+)
+  if (navBar.classList.contains('UnderlineNav-body')) {
+    downloadButton.innerHTML = `
+      <a class="UnderlineNav-item" role="tab" data-view-component="true" aria-current="page">
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" style="margin-right: 4px;">
+          <path d="M8 2c-.55 0-1 .45-1 1v5H2c-.55 0-1 .45-1 1 0 .25.1.5.29.7l6 6c.2.19.45.3.71.3.26 0 .51-.1.71-.29l6-6c.19-.2.29-.45.29-.7 0-.56-.45-1-1-1H9V3c0-.55-.45-1-1-1Z"></path>
+        </svg>
+        <span data-content="${buttonText}">${buttonText}</span>
+      </a>
+    `;
+    
+    // Add green styling
+    const navLink = downloadButton.querySelector('a');
+    navLink.style.color = '#2ea44f';
+    navLink.style.fontWeight = '600';
+    
+    // Add hover effect
+    navLink.addEventListener('mouseover', () => {
+      navLink.style.backgroundColor = 'rgba(46, 164, 79, 0.1)';
+    });
+    navLink.addEventListener('mouseout', () => {
+      navLink.style.backgroundColor = '';
+    });
+    
+    navBar.appendChild(downloadButton);
+  } 
+  // Legacy GitHub UI
+  else {
+    // Create button for older GitHub UI
+    downloadButton.innerHTML = `
+      <a class="btn btn-sm btn-primary" style="background-color: #2ea44f; border-color: #2ea44f;">
+        <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16" data-view-component="true" class="octicon octicon-download mr-1">
+          <path d="M8 2c-.55 0-1 .45-1 1v5H2c-.55 0-1 .45-1 1 0 .25.1.5.29.7l6 6c.2.19.45.3.71.3.26 0 .51-.1.71-.29l6-6c.19-.2.29-.45.29-.7 0-.56-.45-1-1-1H9V3c0-.55-.45-1-1-1Z"></path>
+        </svg>
+        ${buttonText}
+      </a>
+    `;
+    
+    if (navBar.classList.contains('pagehead-actions')) {
+      navBar.insertBefore(downloadButton, navBar.firstChild);
+    } else {
+      navBar.appendChild(downloadButton);
+    }
+  }
+  
+  // Add click event listener to the button
+  const buttonElement = downloadButton.querySelector('a');
+  buttonElement.addEventListener('click', (event) => {
+    event.preventDefault();
+    console.log("Download button clicked");
+    downloadSubdirectory().catch(error => {
+      console.error("Download error:", error);
+      alert(`Download error: ${error.message}`);
+    });
+  });
+  
+  console.log("Download button added to GitHub UI");
+}
+
 // Listen for messages from the popup
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "downloadSubdirectory") {
@@ -135,19 +232,41 @@ async function downloadSubdirectory() {
     console.log("Current path:", currentPath);
 
     // Validate that we're on a valid GitHub repository page
-    if (pathParts.length < 5 || !pathParts.includes("tree")) {
-      throw new Error("Not on a valid GitHub repository subdirectory page");
+    if (pathParts.length < 3) {
+      throw new Error("Not on a valid GitHub repository page");
     }
 
     // Get owner, repo, branch, and directory
     const owner = pathParts[1];
     const repo = pathParts[2];
-    const branchIndex = pathParts.indexOf("tree") + 1;
-    const branch = pathParts[branchIndex];
     
-    // Get the directory path (everything after the branch)
-    const directory = pathParts.slice(branchIndex + 1).join("/");
-    const directoryName = directory.split("/").pop() || repo;
+    // Handle both repository root and subdirectory cases
+    let branch = 'main';
+    let directory = '';
+    let directoryName = repo;
+    
+    // Check if we're on a tree view (subdirectory)
+    const isTreeView = pathParts.includes("tree");
+    if (isTreeView) {
+      const branchIndex = pathParts.indexOf("tree") + 1;
+      if (branchIndex < pathParts.length) {
+        branch = pathParts[branchIndex];
+        directory = pathParts.slice(branchIndex + 1).join("/");
+        directoryName = directory.split("/").pop() || repo;
+      }
+    } else {
+      // For repo root, try to determine the default branch
+      try {
+        const apiResponse = await fetch(`https://api.github.com/repos/${owner}/${repo}`);
+        if (apiResponse.ok) {
+          const repoData = await apiResponse.json();
+          branch = repoData.default_branch;
+        }
+      } catch (error) {
+        console.error("Error determining default branch:", error);
+        // Fall back to 'main' if we can't determine the default branch
+      }
+    }
 
     console.log(`Owner: ${owner}, Repo: ${repo}, Branch: ${branch}, Directory: ${directory}`);
 
@@ -712,6 +831,42 @@ async function downloadSubdirectory() {
     });
     throw error;
   }
+}
+
+// Function to observe DOM changes and add the download button when navigation happens
+function setupMutationObserver() {
+  // Add download button on initial page load
+  addDownloadButtonToUI();
+
+  // Create a mutation observer to watch for navigation changes
+  const observer = new MutationObserver((mutations) => {
+    const navChanged = mutations.some(mutation => {
+      return Array.from(mutation.addedNodes).some(node => {
+        if (node.nodeType === Node.ELEMENT_NODE) {
+          return node.querySelector && (
+            node.querySelector('nav[aria-label="Repository"]') ||
+            node.querySelector('.UnderlineNav-body') ||
+            node.classList.contains('pagehead-actions')
+          );
+        }
+        return false;
+      });
+    });
+
+    if (navChanged) {
+      addDownloadButtonToUI();
+    }
+  });
+
+  // Start observing the document with the configured parameters
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+// Initialize when the DOM is ready
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', setupMutationObserver);
+} else {
+  setupMutationObserver();
 }
 
 // Notify that the content script is loaded
