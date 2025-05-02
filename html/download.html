@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Download File - GitHub Repository Downloader</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      margin: 0;
+      padding: 20px;
+      background-color: #f6f8fa;
+      color: #24292e;
+      text-align: center;
+    }
+    .container {
+      max-width: 600px;
+      margin: 0 auto;
+      background-color: #fff;
+      border-radius: 6px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12);
+      padding: 20px;
+    }
+    h1 {
+      font-size: 24px;
+      margin-bottom: 10px;
+    }
+    .info {
+      font-size: 14px;
+      color: #586069;
+      margin-bottom: 20px;
+    }
+    .download-btn {
+      background-color: #2ea44f;
+      color: white;
+      border: none;
+      padding: 10px 16px;
+      font-size: 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-weight: 500;
+      margin: 10px auto;
+      display: block;
+    }
+    .download-btn:hover {
+      background-color: #2c974b;
+    }
+    .download-btn:disabled {
+      background-color: #94d3a2;
+      cursor: not-allowed;
+    }
+    #status {
+      margin-top: 20px;
+      padding: 10px;
+      border-radius: 6px;
+    }
+    .success {
+      background-color: #e6ffed;
+      border: 1px solid #b4e2c5;
+      color: #22863a;
+    }
+    .error {
+      background-color: #ffebe9;
+      border: 1px solid #ffcdd2;
+      color: #d73a49;
+    }
+    .loading {
+      background-color: #f1f8ff;
+      border: 1px solid #c8e1ff;
+      color: #0366d6;
+    }
+    .progress-container {
+      width: 100%;
+      background-color: #f6f8fa;
+      border-radius: 4px;
+      margin: 15px 0;
+      overflow: hidden;
+    }
+    .progress-bar {
+      width: 0%;
+      height: 8px;
+      background-color: #2ea44f;
+      transition: width 0.3s;
+    }
+    .file-info {
+      margin: 15px 0;
+      font-size: 14px;
+      text-align: left;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>GitHub Repository Downloader</h1>
+    <div class="info">This page helps download your ZIP file</div>
+    
+    <div class="file-info">
+      <div><strong>File Name:</strong> <span id="fileName">Loading...</span></div>
+      <div><strong>File Size:</strong> <span id="fileSize">Calculating...</span></div>
+    </div>
+    
+    <div class="progress-container" id="progressContainer">
+      <div class="progress-bar" id="progressBar"></div>
+    </div>
+    
+    <button id="downloadBtn" class="download-btn" disabled>Download ZIP</button>
+    
+    <div id="status" style="display: none;">Please wait...</div>
+  </div>
+
+  <!-- Include FileSaver.js -->
+  <script src="../lib/FileSaver.min.js"></script>
+  
+  <script>
+    // Get URL parameters
+    const urlParams = new URLSearchParams(window.location.search);
+    const blobId = urlParams.get('blobId');
+    const fileName = urlParams.get('fileName') || 'download.zip';
+    const fileSize = urlParams.get('fileSize') || '0';
+    const autoStart = urlParams.get('autoStart') === 'true';
+    
+    // Elements
+    const downloadBtn = document.getElementById('downloadBtn');
+    const fileNameEl = document.getElementById('fileName');
+    const fileSizeEl = document.getElementById('fileSize');
+    const statusEl = document.getElementById('status');
+    const progressBar = document.getElementById('progressBar');
+    const progressContainer = document.getElementById('progressContainer');
+    
+    // Show file info
+    fileNameEl.textContent = fileName;
+    fileSizeEl.textContent = formatFileSize(fileSize);
+    
+    // Function to show status message
+    function showStatus(message, type) {
+      statusEl.textContent = message;
+      statusEl.className = type || '';
+      statusEl.style.display = 'block';
+    }
+    
+    // Function to update progress bar
+    function updateProgress(percent) {
+      progressBar.style.width = `${percent}%`;
+    }
+    
+    // Function to format file size
+    function formatFileSize(bytes) {
+      if (!bytes || isNaN(bytes)) return 'Unknown';
+      bytes = parseInt(bytes);
+      
+      if (bytes === 0) return '0 Bytes';
+      
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+    }
+    
+    // Function to download the blob
+    async function downloadBlob() {
+      if (!blobId) {
+        showStatus('Error: No blob ID provided', 'error');
+        return;
+      }
+      
+      try {
+        downloadBtn.disabled = true;
+        showStatus('Retrieving file data...', 'loading');
+        updateProgress(10);
+        
+        // Request the blob from the background script
+        chrome.runtime.sendMessage({
+          action: 'requestDownloadBlob',
+          blobId: blobId
+        }, response => {
+          if (chrome.runtime.lastError) {
+            showStatus(`Error: ${chrome.runtime.lastError.message}`, 'error');
+            downloadBtn.disabled = false;
+            return;
+          }
+          
+          if (!response.success) {
+            showStatus(`Error: ${response.error || 'Failed to get file data'}`, 'error');
+            downloadBtn.disabled = false;
+            return;
+          }
+          
+          updateProgress(50);
+          showStatus('Preparing download...', 'loading');
+          
+          try {
+            // We have the blob, now we can download it
+            const blob = response.blob;
+            const filename = response.filename || fileName;
+            
+            // Check if the FileSaver library is available
+            if (typeof saveAs === 'function') {
+              // Use FileSaver.js to save the blob
+              updateProgress(75);
+              showStatus('Starting download...', 'loading');
+              
+              saveAs(blob, filename);
+              
+              updateProgress(100);
+              showStatus('Download initiated! Check your downloads folder.', 'success');
+              
+              // Enable button for retry
+              setTimeout(() => {
+                downloadBtn.disabled = false;
+                downloadBtn.textContent = 'Download Again';
+              }, 2000);
+            } else {
+              // Fallback if FileSaver is not available
+              updateProgress(75);
+              showStatus('Starting download using browser...', 'loading');
+              
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = filename;
+              document.body.appendChild(a);
+              a.click();
+              
+              setTimeout(() => {
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                
+                updateProgress(100);
+                showStatus('Download initiated! Check your downloads folder.', 'success');
+                
+                // Enable button for retry
+                downloadBtn.disabled = false;
+                downloadBtn.textContent = 'Download Again';
+              }, 1000);
+            }
+          } catch (error) {
+            console.error('Error downloading file:', error);
+            showStatus(`Error downloading file: ${error.message}`, 'error');
+            downloadBtn.disabled = false;
+          }
+        });
+      } catch (error) {
+        console.error('Error in download process:', error);
+        showStatus(`Error: ${error.message}`, 'error');
+        downloadBtn.disabled = false;
+      }
+    }
+    
+    // Initialize download button
+    downloadBtn.addEventListener('click', downloadBlob);
+    
+    // Enable download button once everything is loaded
+    window.addEventListener('DOMContentLoaded', () => {
+      downloadBtn.disabled = false;
+      
+      // Auto-start download if requested
+      if (autoStart) {
+        downloadBlob();
+      }
+    });
+    
+    // Auto-start download if specified in URL
+    if (autoStart) {
+      showStatus('Automatically starting download...', 'loading');
+      setTimeout(downloadBlob, 500); // Short delay to ensure everything is loaded
+    }
+  </script>
+</body>
+</html> 

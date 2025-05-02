@@ -24,6 +24,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   }
   
+  // Handle executeScript action - CSP-compliant script injection
+  if (message.action === "executeScript") {
+    try {
+      console.log("Executing script via chrome.scripting API");
+      
+      if (!sender.tab || !sender.tab.id) {
+        console.error("No tab ID available for script injection");
+        sendResponse({ success: false, error: "No tab ID available" });
+        return true;
+      }
+      
+      // Get script path relative to the extension root
+      const scriptPath = message.scriptUrl ? 
+          message.scriptUrl.replace(chrome.runtime.getURL(''), '') : 
+          'lib/jszip.min.js';
+          
+      console.log("Injecting script:", scriptPath);
+      
+      // Use chrome.scripting API to inject the script properly
+      chrome.scripting.executeScript({
+        target: { tabId: sender.tab.id },
+        files: [scriptPath]
+      })
+      .then(() => {
+        console.log("Script injection successful via chrome.scripting API");
+        sendResponse({ success: true });
+      })
+      .catch((error) => {
+        console.error("Script injection error:", error);
+        sendResponse({ success: false, error: error.message });
+      });
+      
+      return true; // Keep messaging channel open for async response
+    } catch (error) {
+      console.error("Error in executeScript action:", error);
+      sendResponse({ success: false, error: error.message });
+      return true;
+    }
+  }
+  
   // Handle storing a blob for download
   if (message.action === "storeBlob") {
     try {
@@ -114,7 +154,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.log(`Opening download page for blob ${blobId}, file: ${filename}`);
       
       // Construct the download page URL with parameters
-      const downloadUrl = chrome.runtime.getURL("download.html") + 
+      const downloadUrl = chrome.runtime.getURL("html/download.html") + 
         `?blobId=${encodeURIComponent(blobId)}` +
         `&fileName=${encodeURIComponent(filename)}` +
         `&fileSize=${encodeURIComponent(fileSize)}` +
@@ -218,48 +258,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   
   // Add handler for loading JSZip from background
   if (message.action === "loadJSZip") {
-    console.log("Background script: Request to load JSZip received");
-    
-    // Load the JSZip library using fetch
-    const jsZipUrl = chrome.runtime.getURL("jszip.min.js");
-    console.log("Loading JSZip from:", jsZipUrl);
-    
-    fetch(jsZipUrl)
-      .then(response => {
-        if (!response.ok) {
-          throw new Error(`Failed to fetch JSZip: ${response.status}`);
-        }
-        return response.text();
-      })
-      .then(jsZipCode => {
-        console.log("JSZip loaded in background, size:", jsZipCode.length);
-        
-        // Send back success response
-        sendResponse({ 
-          success: true,
-          message: "JSZip loaded from background service worker" 
-        });
-        
-        // Inject script into the page
-        chrome.scripting.executeScript({
-          target: { tabId: sender.tab.id },
-          files: ["jszip.min.js"]
-        }).then(() => {
-          console.log("JSZip injected into page");
-        }).catch(err => {
-          console.error("Error injecting JSZip:", err);
-        });
-      })
-      .catch(error => {
-        console.error("Error loading JSZip in background:", error);
-        sendResponse({ 
-          success: false, 
-          error: error.message 
-        });
+    try {
+      console.log("Loading JSZip from background service worker");
+      
+      // Return the URL to the JSZip library instead of the code itself
+      // This is more CSP-friendly
+      const jsZipUrl = chrome.runtime.getURL('lib/jszip.min.js');
+      console.log("Providing JSZip URL:", jsZipUrl);
+      
+      sendResponse({
+        success: true,
+        jsZipUrl: jsZipUrl
       });
-    
-    // Return true to indicate we'll send a response asynchronously
-    return true;
+      
+      return true; // Keep the messaging channel open
+    } catch (error) {
+      console.error("Error in loadJSZip:", error);
+      sendResponse({
+        success: false,
+        error: error.message
+      });
+      return true;
+    }
   }
   
   // Handler for direct URL-based download from download.html

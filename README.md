@@ -6,13 +6,14 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 
 ## Features
 
-- **Integrated Download Button**: A green download button is added directly to the GitHub interface
+- **Integrated Download Button**: A download button is added directly to the GitHub interface
 - **Directory Support**: Download specific subdirectories without having to clone the entire repository
 - **Recursive Downloads**: Automatically includes all subdirectories and their files in the download
 - **Progress Tracking**: Detailed progress information as files are downloaded and the ZIP is created
 - **Modern & Legacy UI Support**: Works with both the latest GitHub interface and older versions
 - **Fallback Methods**: Multiple download techniques ensure files are retrieved even if the primary method fails
 - **Error Recovery**: Continues downloading even if individual files fail
+- **Customization Options**: Personalize the extension's appearance with custom colors and button styles
 
 ## Installation
 
@@ -35,7 +36,7 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 ### Option 1: Using the Integrated Download Button
 
 1. Navigate to any GitHub repository or subdirectory
-2. Look for the green "Download Repository" or "Download Directory" button in the GitHub navigation bar
+2. Look for the "Download Repository" or "Download Directory" button in the GitHub navigation bar
 3. Click the button to start the download
 4. A progress indicator will appear in the extension popup
 5. The ZIP file will be downloaded automatically when complete
@@ -51,6 +52,21 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 5. The ZIP file will be downloaded automatically when complete
 
 ![Extension Popup](screenshots/popup.png)
+
+## Customization
+
+You can personalize the appearance of the extension through the settings page:
+
+1. Right-click on the extension icon in your browser toolbar
+2. Select "Options" to open the settings page
+3. Customize the following:
+   - **Download Button Color**: Choose any color for the download button
+   - **Popup Background Color**: Customize the background color of the popup
+   - **Button Text**: Change the text displayed on the download button
+   - **Button Style**: Choose from different button styles (Default, Outline, Rounded, Pill)
+4. Click "Save Settings" to apply your changes
+
+![Settings Page](screenshots/settings.png)
 
 ## How It Works
 
@@ -94,6 +110,7 @@ This extension:
 ## Credits
 
 - [JSZip](https://stuk.github.io/jszip/) for ZIP file creation
+- [FileSaver.js](https://github.com/eligrey/FileSaver.js) for enhanced download capabilities
 - Icon designed by [Freepik](https://www.freepik.com/)
 
 ## License
