@@ -496,7 +496,10 @@ function extractRepositoryInfo(url) {
       return null;
     }
 
-    const pathParts = urlObj.pathname.split('/').filter(part => part.length > 0);
+    // Decode the pathname to handle URL-encoded characters
+    const decodedPathname = decodeURIComponent(urlObj.pathname);
+    const pathParts = decodedPathname.split('/').filter(part => part.length > 0);
+    
     if (pathParts.length < 2) {
       return null; // Not enough parts for a valid repo
     }
@@ -550,8 +553,14 @@ function getRawContentUrl(repoInfo, filePath) {
   // Clean up the file path to ensure it doesn't have leading slashes
   const cleanPath = filePath.replace(/^\/+/, '');
   
+  // First decode the path in case it already contains URL-encoded characters
+  const decodedPath = decodeURIComponent(cleanPath);
+  
   // Use the raw.githubusercontent.com domain for direct file access
-  return `https://raw.githubusercontent.com/${repoInfo.owner}/${repoInfo.repo}/${repoInfo.branch}/${cleanPath}`;
+  // Each path component needs to be properly encoded
+  const encodedPath = decodedPath.split('/').map(part => encodeURIComponent(part)).join('/');
+  
+  return `https://raw.githubusercontent.com/${repoInfo.owner}/${repoInfo.repo}/${repoInfo.branch}/${encodedPath}`;
 }
 
 // Generate GitHub API URL for a file
@@ -559,8 +568,11 @@ function getApiUrl(repoInfo, filePath) {
   // Clean up the file path to ensure it doesn't have leading slashes
   const cleanPath = filePath.replace(/^\/+/, '');
   
+  // First decode the path in case it already contains URL-encoded characters
+  const decodedPath = decodeURIComponent(cleanPath);
+  
   // Properly encode path components for the API URL
-  const encodedPath = cleanPath.split('/').map(part => encodeURIComponent(part)).join('/');
+  const encodedPath = decodedPath.split('/').map(part => encodeURIComponent(part)).join('/');
   
   return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${encodedPath}?ref=${repoInfo.branch}`;
 }
@@ -575,8 +587,11 @@ function getDirectoryApiUrl(repoInfo, dirPath) {
     return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents?ref=${repoInfo.branch}`;
   }
   
-  // Properly encode path components for the API URL
-  const encodedPath = cleanPath.split('/').map(part => encodeURIComponent(part)).join('/');
+  // First decode the path in case it already contains URL-encoded characters
+  const decodedPath = decodeURIComponent(cleanPath);
+  
+  // Now properly encode path components for the API URL
+  const encodedPath = decodedPath.split('/').map(part => encodeURIComponent(part)).join('/');
   
   return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${encodedPath}?ref=${repoInfo.branch}`;
 }
@@ -1036,6 +1051,13 @@ function downloadSubdirectory(repoInfo) {
     console.error(errorMsg, repoInfo);
     sendProgressUpdate(errorMsg);
     return;
+  }
+  
+  // Ensure branch name is set correctly
+  if (!repoInfo.branch) {
+    // Default to main but try to detect if repository uses master instead
+    repoInfo.branch = window.location.href.includes('/tree/master/') ? 'master' : 'main';
+    console.log(`Using detected branch: ${repoInfo.branch}`);
   }
   
   // Set a global status element for progress updates
