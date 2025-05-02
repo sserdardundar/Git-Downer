@@ -198,11 +198,11 @@ function loadJSZip() {
     console.log("Attempting to load JSZip via chrome.scripting API");
     
     // Request the background script to inject JSZip using the scripting API
-    chrome.runtime.sendMessage({
+        chrome.runtime.sendMessage({
       action: "executeScript",
       scriptUrl: chrome.runtime.getURL('lib/jszip.min.js')
-    }, (response) => {
-      if (chrome.runtime.lastError) {
+        }, (response) => {
+          if (chrome.runtime.lastError) {
         console.error("Error requesting script injection:", chrome.runtime.lastError);
         fallbackLoadJSZip(resolve, reject);
         return;
@@ -215,16 +215,16 @@ function loadJSZip() {
         if (typeof JSZip === 'function') {
           console.log("JSZip is now available in global context");
           resolve(JSZip);
-        } else {
+              } else {
           console.warn("JSZip not found in global context after injection, trying fallback");
           fallbackLoadJSZip(resolve, reject);
-        }
-      } else {
+            }
+          } else {
         console.error("Failed to inject JSZip:", response?.error || "Unknown error");
         fallbackLoadJSZip(resolve, reject);
-      }
-    });
-  });
+          }
+        });
+      });
 }
 
 // Fallback method to load JSZip for browsers or contexts where the scripting API fails
@@ -601,7 +601,7 @@ function tryDirectDownload(repoInfo) {
     
     sendProgressUpdate("Using GitHub's native download option.");
     return true;
-  } else {
+        } else {
     console.log("No GitHub native download button found. Creating custom one.");
     
     // If we have a subdirectory, we shouldn't use the repository root download
@@ -751,8 +751,8 @@ async function downloadFile(repoInfo, filePath, maxRetries = 3) {
       } catch (apiError) {
         clearTimeout(apiTimeoutId);
         throw apiError; // Re-throw to trigger retry
-      }
-    } catch (error) {
+              }
+            } catch (error) {
       lastError = error;
       retryCount++;
       
@@ -761,7 +761,7 @@ async function downloadFile(repoInfo, filePath, maxRetries = 3) {
         const delay = Math.min(1000 * Math.pow(2, retryCount), 10000);
         console.warn(`Download failed for ${filePath}, retrying in ${delay}ms: ${error.message}`);
         await new Promise(resolve => setTimeout(resolve, delay));
-      } else {
+        } else {
         console.error(`Failed to download ${filePath} after ${maxRetries} retries:`, error);
       }
     }
@@ -784,7 +784,7 @@ async function handleSubdirectoryDownload(repoInfo) {
       if (typeof JSZip === 'function') {
         console.log("Using existing JSZip instance");
         zip = new JSZip();
-      } else {
+        } else {
         console.log("Loading JSZip...");
         let JSZipClass = await loadJSZip();
         zip = new JSZipClass();
@@ -812,7 +812,7 @@ async function handleSubdirectoryDownload(repoInfo) {
           console.log("JSZip loaded from CDN");
           if (typeof JSZip === 'function') {
             zip = new JSZip();
-          } else {
+            } else {
             throw new Error("JSZip not available after CDN loading");
           }
         } catch (cdnError) {
@@ -903,11 +903,11 @@ async function handleSubdirectoryDownload(repoInfo) {
         
         if (retry) {
           retryCount++;
-        } else {
+          } else {
           // Break the loop if we're done
           break;
-        }
-      } catch (error) {
+          }
+        } catch (error) {
         console.error("Error during directory processing:", error);
         sendProgressUpdate(`Error: ${error.message}`);
         
@@ -1069,14 +1069,14 @@ function downloadSubdirectory(repoInfo) {
     console.log(`Using direct download URL: ${archiveUrl}`);
     
     // Use our background script to download the file
-    chrome.runtime.sendMessage({
+      chrome.runtime.sendMessage({
       action: "downloadRepositoryZip",
       url: archiveUrl,
       fileName: `${repoInfo.owner}_${repoInfo.repo}.zip`
     }, response => {
-      if (response && response.success) {
+        if (response && response.success) {
         sendProgressUpdate("Download initiated");
-      } else {
+        } else {
         const errorMessage = response?.error || "Download failed";
         console.error("Download error:", errorMessage);
         sendProgressUpdate(`Error: ${errorMessage}`);
@@ -1108,7 +1108,7 @@ function openDownloadPage(blobId, filename, fileSize) {
           reject(chrome.runtime.lastError);
         } else if (response && response.success) {
           resolve(response);
-        } else {
+              } else {
           reject(new Error("Failed to open download page"));
         }
       });
@@ -1156,22 +1156,22 @@ async function downloadRepositoryZip(repoInfo) {
     
     // Get the blob from storage
     const blobData = await new Promise((resolve) => {
-      chrome.runtime.sendMessage({
+        chrome.runtime.sendMessage({
         action: "requestDownloadBlob",
         blobId: result.blobId
       }, (response) => {
-        if (chrome.runtime.lastError) {
+          if (chrome.runtime.lastError) {
           console.error("Error retrieving blob:", chrome.runtime.lastError);
           resolve(null);
         } else if (!response || !response.success) {
           console.error("Failed to retrieve blob:", response?.error);
           resolve(null);
-        } else {
+          } else {
           resolve(response);
-        }
+          }
+        });
       });
-    });
-    
+      
     if (!blobData || !blobData.blob) {
       throw new Error("Failed to retrieve repository ZIP data");
     }
@@ -1180,21 +1180,21 @@ async function downloadRepositoryZip(repoInfo) {
     const repositorySizeMB = blobData.blob.size / (1024 * 1024);
     if (repositorySizeMB > CONFIG.maxRepositorySizeMB) {
       console.warn(`Repository size (${repositorySizeMB.toFixed(2)} MB) exceeds max size (${CONFIG.maxRepositorySizeMB} MB)`);
-      return {
+        return {
         success: false,
         error: `Repository is too large (${repositorySizeMB.toFixed(2)} MB) for optimized download. Try the legacy method.`
       };
     }
-    
-    return {
-      success: true,
+        
+        return {
+          success: true,
       blob: blobData.blob,
       filename: blobData.filename || `${repoInfo.repo}-${repoInfo.branch}.zip`,
       size: blobData.blob.size
     };
   } catch (error) {
     console.error("Error downloading repository ZIP:", error);
-    return {
+          return {
       success: false,
       error: error.message
     };
@@ -1346,7 +1346,7 @@ async function extractSubdirectoryFromZip(zipBlob, repoInfo, subdirectoryPath, p
       filesCount: filesProcessed,
       size: zipBlob.size
     };
-  } catch (error) {
+      } catch (error) {
     console.error("Error extracting subdirectory from ZIP:", error);
     return {
       success: false,
@@ -1509,7 +1509,7 @@ async function processDirectoryConcurrent(repoInfo, currentDirPath, zip, basePat
           }
           
           return { success: true, path: file.path };
-        } catch (error) {
+    } catch (error) {
           console.error(`Failed to process file ${file.path}:`, error);
           failedFiles++;
           
