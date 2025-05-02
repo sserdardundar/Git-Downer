@@ -18,7 +18,7 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 
 ## Installation
 
-### From the Chrome Web Store
+### From the Chrome Web Store (!!SOON)
 
 1. Visit the [GitHub Repository Downloader](https://chrome.google.com/webstore/detail/github-repository-downloa/extension-id) page in the Chrome Web Store
 2. Click "Add to Chrome" to install the extension
