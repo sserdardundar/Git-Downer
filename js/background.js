@@ -120,7 +120,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle blob retrieval request from the download page
   if (message.action === "requestDownloadBlob") {
     const blobId = message.blobId;
-    console.log("Background script: Request to get blob", blobId);
+    console.log("Background script: Request to get download blob", blobId);
     
     if (!blobId || !blobStorage.has(blobId)) {
       console.error(`Blob with ID ${blobId} not found`);
@@ -131,13 +131,33 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       return true;
     }
     
-    const blobData = blobStorage.get(blobId);
-    console.log(`Retrieved blob for ${blobData.filename}`);
+    const blobInfo = blobStorage.get(blobId);
+    console.log(`Retrieved blob info for ${blobInfo.filename}`, blobInfo);
     
+    // If this is a download ID-based blob, we need to get the file data
+    if (blobInfo.downloadId) {
+      // We need to open the file using chrome.downloads.open
+      chrome.downloads.open(blobInfo.downloadId);
+      
+      // Since we can't directly access the file contents due to Chrome's security model,
+      // we'll tell the content script to use the downloadRepositoryZip method instead
+      sendResponse({
+        success: false, 
+        useDownloadAPI: true,
+        error: "Direct blob access not supported for downloaded files. Use chrome.downloads.download instead.",
+        downloadUrl: blobInfo.originalUrl,
+        filename: blobInfo.filename,
+        size: blobInfo.size
+      });
+      return true;
+    }
+    
+    // For regular blobs we stored directly
     sendResponse({
       success: true,
-      blob: blobData.blob,
-      filename: blobData.filename
+      blob: blobInfo.blob,
+      filename: blobInfo.filename,
+      size: blobInfo.size
     });
     
     return true;
@@ -228,29 +248,71 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                 
                 if (delta.state.current === "complete") {
                   console.log(`Download ${downloadId} completed successfully`);
-                  // Remove the listener once download is complete
-                  chrome.downloads.onChanged.removeListener(downloadListener);
-                  
-                  // Revoke the blob URL after the download is complete
-                  setTimeout(() => {
-                    URL.revokeObjectURL(url);
-                    console.log("Revoked blob URL after download");
-                  }, 5000);
-                } else if (delta.state.current === "interrupted") {
-                  console.error(`Download ${downloadId} interrupted:`, delta.error?.current);
-                  // Remove the listener on interruption
-                  chrome.downloads.onChanged.removeListener(downloadListener);
+                  // Cleanup
                   URL.revokeObjectURL(url);
+                  chrome.downloads.onChanged.removeListener(downloadListener);
+                  // We don't send a response here as the response has already been sent
+                } else if (delta.state.current === "interrupted") {
+                  console.error(`Download ${downloadId} was interrupted`);
+                  URL.revokeObjectURL(url);
+                  chrome.downloads.onChanged.removeListener(downloadListener);
                 }
               }
             }
           });
           
-          sendResponse({ success: true, downloadId });
+          // Send the success response
+          sendResponse({ 
+            success: true, 
+            downloadId: downloadId,
+            message: "Download initiated successfully"
+          });
         }
       });
     } catch (error) {
-      console.error("Error starting direct download:", error);
+      console.error("Error initiating download:", error);
+      sendResponse({ success: false, error: error.message });
+    }
+    return true; // Keep the messaging channel open
+  }
+  
+  // Handle downloadBlob action for data URLs
+  if (message.action === "downloadBlob") {
+    try {
+      console.log("Received request to download blob from data URL:", message.filename);
+      
+      if (!message.dataUrl) {
+        console.error("No data URL provided for download");
+        sendResponse({ success: false, error: "No data URL provided" });
+        return true;
+      }
+      
+      const filename = message.filename || `download_${Date.now()}.zip`;
+      
+      // Use Chrome's downloads API with the data URL
+      chrome.downloads.download({
+        url: message.dataUrl,
+        filename: filename,
+        saveAs: message.saveAs || false,
+        conflictAction: "uniquify"
+      }, (downloadId) => {
+        if (chrome.runtime.lastError) {
+          console.error("Download error:", chrome.runtime.lastError);
+          sendResponse({ success: false, error: chrome.runtime.lastError.message });
+        } else if (downloadId === undefined) {
+          console.error("Download failed, no ID returned");
+          sendResponse({ success: false, error: "Download failed to start" });
+        } else {
+          console.log("Download started with ID:", downloadId);
+          sendResponse({ 
+            success: true, 
+            downloadId: downloadId,
+            message: "Download initiated successfully"
+          });
+        }
+      });
+    } catch (error) {
+      console.error("Error initiating download from data URL:", error);
       sendResponse({ success: false, error: error.message });
     }
     return true; // Keep the messaging channel open
@@ -352,6 +414,159 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     } catch (error) {
       console.error("Error opening tab:", error);
       sendResponse({ success: false, error: error.message });
+      return true;
+    }
+  }
+  
+  // Handle repository download request (bypasses CORS)
+  if (message.action === "downloadRepositoryZip") {
+    try {
+      console.log("Background script: Downloading repository ZIP:", message.url);
+      
+      // Use Chrome's downloads API directly to download the file
+      // This bypasses CORS issues completely
+      chrome.downloads.download({
+        url: message.url,
+        filename: message.filename || 'repository.zip',
+        conflictAction: 'uniquify'
+      }, (downloadId) => {
+        if (chrome.runtime.lastError) {
+          console.error("Repository download error:", chrome.runtime.lastError);
+          sendResponse({
+            success: false, 
+            error: chrome.runtime.lastError.message
+          });
+        } else if (downloadId === undefined) {
+          console.error("Repository download failed, no ID returned");
+          sendResponse({
+            success: false,
+            error: "Download failed to start"
+          });
+        } else {
+          console.log(`Repository download started with ID: ${downloadId}`);
+          sendResponse({
+            success: true,
+            downloadId: downloadId,
+            message: "Repository download initiated directly"
+          });
+        }
+      });
+      
+      return true; // Keep message channel open for async response
+    } catch (error) {
+      console.error("Error handling repository download:", error);
+      sendResponse({
+        success: false,
+        error: error.message
+      });
+      return true;
+    }
+  }
+  
+  // Handle repository download request for subdirectory extraction
+  if (message.action === "downloadRepositoryForExtraction") {
+    try {
+      console.log("Background script: Downloading repository ZIP for extraction:", message.url);
+      
+      // Instead of using fetch (which can be blocked by CORS), use Chrome's downloads API
+      // First create a temporary file name for the download
+      const tempFileName = `repo_${Date.now()}.zip`;
+      
+      // Use Chrome's downloads API to download the file
+      chrome.downloads.download({
+        url: message.url,
+        filename: tempFileName,
+        conflictAction: 'uniquify',
+        saveAs: false
+      }, (downloadId) => {
+        if (chrome.runtime.lastError) {
+          console.error("Repository download error:", chrome.runtime.lastError);
+          sendResponse({
+            success: false, 
+            error: chrome.runtime.lastError.message
+          });
+          return;
+        }
+        
+        if (downloadId === undefined) {
+          console.error("Repository download failed, no ID returned");
+          sendResponse({
+            success: false,
+            error: "Download failed to start"
+          });
+          return;
+        }
+        
+        console.log(`Repository download started with ID: ${downloadId}`);
+        
+        // Monitor the download progress
+        const downloadListener = function(delta) {
+          if (delta.id !== downloadId) return;
+          
+          // Check if download state changed
+          if (delta.state) {
+            if (delta.state.current === "complete") {
+              console.log(`Repository download ${downloadId} completed`);
+              
+              // Get download information
+              chrome.downloads.search({id: downloadId}, function(downloadItems) {
+                if (downloadItems && downloadItems.length > 0) {
+                  const downloadItem = downloadItems[0];
+                  console.log(`Download completed: ${downloadItem.filename}, size: ${downloadItem.fileSize} bytes`);
+                  
+                  // Create a blobId for tracking
+                  const blobId = 'repo_' + Date.now() + '_' + Math.random().toString(36).substring(2, 15);
+                  
+                  // Store download info for processing by content script
+                  blobStorage.set(blobId, {
+                    downloadId: downloadId,
+                    filename: downloadItem.filename,
+                    originalUrl: message.url,
+                    timestamp: Date.now(),
+                    size: downloadItem.fileSize
+                  });
+                  
+                  // Return success with the blobId
+                  sendResponse({
+                    success: true,
+                    blobId: blobId,
+                    size: downloadItem.fileSize,
+                    filename: downloadItem.filename
+                  });
+                  
+                  // Remove the listener
+                  chrome.downloads.onChanged.removeListener(downloadListener);
+                } else {
+                  sendResponse({
+                    success: false,
+                    error: "Could not find download information"
+                  });
+                  chrome.downloads.onChanged.removeListener(downloadListener);
+                }
+              });
+            } 
+            else if (delta.state.current === "interrupted") {
+              console.error(`Repository download ${downloadId} interrupted`, delta.error);
+              sendResponse({
+                success: false,
+                error: `Download interrupted: ${delta.error?.current || "Unknown error"}`
+              });
+              chrome.downloads.onChanged.removeListener(downloadListener);
+            }
+          }
+        };
+        
+        // Add the listener for download state changes
+        chrome.downloads.onChanged.addListener(downloadListener);
+      });
+      
+      return true; // Keep message channel open for async response
+    } catch (error) {
+      console.error("Error handling repository download for extraction:", error);
+      sendResponse({
+        success: false,
+        error: error.message
+      });
       return true;
     }
   }

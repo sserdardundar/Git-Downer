@@ -5,7 +5,8 @@ const defaultSettings = {
   buttonColor: '#2ea44f',      // GitHub green
   popupBgColor: '#f6f8fa',     // GitHub light gray
   buttonText: 'Download Repository',
-  buttonStyle: 'default'       // default, outline, rounded, pill
+  buttonStyle: 'default',      // default, outline, rounded, pill
+  namingPolicy: 'fullPath'     // fullPath, simpleName
 };
 
 // Initialize settings
@@ -16,6 +17,8 @@ document.addEventListener('DOMContentLoaded', function() {
   const popupBgPreview = document.getElementById('popupBgPreview');
   const buttonTextInput = document.getElementById('buttonText');
   const buttonStyleSelect = document.getElementById('buttonStyle');
+  const namingPolicyFull = document.getElementById('namingPolicyFull');
+  const namingPolicySimple = document.getElementById('namingPolicySimple');
   const saveButton = document.getElementById('saveSettings');
   const resetButton = document.getElementById('resetSettings');
   const messageDiv = document.getElementById('message');
@@ -36,6 +39,8 @@ document.addEventListener('DOMContentLoaded', function() {
     popupBgPreview.style.backgroundColor = settings.popupBgColor;
     buttonTextInput.value = settings.buttonText;
     buttonStyleSelect.value = settings.buttonStyle;
+    namingPolicyFull.checked = settings.namingPolicy === 'fullPath';
+    namingPolicySimple.checked = settings.namingPolicy === 'simpleName';
     
     // Update preview
     updatePreview(settings);
@@ -62,6 +67,15 @@ document.addEventListener('DOMContentLoaded', function() {
     updatePreview();
   });
   
+  // Handle naming policy selection changes
+  namingPolicyFull.addEventListener('change', function() {
+    updatePreview();
+  });
+  
+  namingPolicySimple.addEventListener('change', function() {
+    updatePreview();
+  });
+  
   // Handle preset button clicks
   presetButtonColors.forEach(button => {
     button.addEventListener('click', function() {
@@ -85,7 +99,8 @@ document.addEventListener('DOMContentLoaded', function() {
       buttonColor: buttonColorInput.value,
       popupBgColor: popupBgColorInput.value,
       buttonText: buttonTextInput.value,
-      buttonStyle: buttonStyleSelect.value
+      buttonStyle: buttonStyleSelect.value,
+      namingPolicy: namingPolicyFull.checked ? 'fullPath' : 'simpleName'
     };
     
     chrome.storage.sync.set(settings, function() {
@@ -104,6 +119,8 @@ document.addEventListener('DOMContentLoaded', function() {
         popupBgPreview.style.backgroundColor = defaultSettings.popupBgColor;
         buttonTextInput.value = defaultSettings.buttonText;
         buttonStyleSelect.value = defaultSettings.buttonStyle;
+        namingPolicyFull.checked = defaultSettings.namingPolicy === 'fullPath';
+        namingPolicySimple.checked = defaultSettings.namingPolicy === 'simpleName';
         
         // Update preview
         updatePreview(defaultSettings);
@@ -120,6 +137,7 @@ document.addEventListener('DOMContentLoaded', function() {
     const bgColor = settings ? settings.popupBgColor : popupBgColorInput.value;
     const btnText = settings ? settings.buttonText : buttonTextInput.value;
     const btnStyle = settings ? settings.buttonStyle : buttonStyleSelect.value;
+    const namingPolicy = settings ? settings.namingPolicy : namingPolicyFull.checked ? 'fullPath' : 'simpleName';
     
     // Update preview popup
     previewPopup.style.backgroundColor = bgColor;

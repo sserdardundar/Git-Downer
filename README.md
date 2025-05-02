@@ -2,7 +2,7 @@
 
 A Chrome extension that lets you download GitHub repositories or specific subdirectories as ZIP files directly from the GitHub interface.
 
-![GitHub Repository Downloader](screenshots/preview.png)
+<img src="screenshots/preview.png" alt="GitHub Repository Downloader" width="400" height="400">
 
 ## Features
 
@@ -10,11 +10,14 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 - **Directory Support**: Download specific subdirectories without having to clone the entire repository
 - **Recursive Downloads**: Automatically includes all subdirectories and their files in the download
 - **Progress Tracking**: Detailed progress information as files are downloaded and the ZIP is created
+- **User-Friendly Notifications**: Status notifications with progress bars that auto-dismiss when complete
+- **Robust Error Handling**: Multiple retry attempts with exponential backoff for failed downloads
 - **CSP-Compliant**: Properly handles Content Security Policy restrictions with multiple loading methods
 - **Modern & Legacy UI Support**: Works with both the latest GitHub interface and older versions
 - **Fallback Methods**: Multiple download techniques ensure files are retrieved even if the primary method fails
 - **Error Recovery**: Continues downloading even if individual files fail
 - **Customization Options**: Personalize the extension's appearance with custom colors and button styles
+- **Optimized Downloads**: Uses a high-performance approach to quickly download subdirectories
 
 ## Installation
 
@@ -56,14 +59,37 @@ A Chrome extension that lets you download GitHub repositories or specific subdir
 
 ### Downloading Subdirectories
 
-The extension can download specific subdirectories rather than the entire repository:
+The extension provides efficient ways to download specific subdirectories:
 
 1. Navigate to the specific subdirectory within a GitHub repository
 2. The download button will change to "Download Directory"
 3. Click the button to download only that subdirectory and its contents
-4. The ZIP file will contain the correct directory structure with the subdirectory as the root
+4. The extension processes the subdirectory and creates a ZIP containing only those files
+5. The ZIP file will have the subdirectory as the root, with the correct folder structure
 
-This is especially useful for large repositories where you only need a small section.
+This is especially useful for large repositories where you only need a small section. The extension uses concurrent downloads to speed up this process, efficiently handling many files at once.
+
+## Optimization Techniques
+
+This extension uses two methods for downloading GitHub repositories:
+
+### 1. Direct Repository Download
+- Uses GitHub's native download functionality for complete repositories
+- Bypasses CORS restrictions by using Chrome's download API
+- Downloads the entire repository as a ZIP file
+- This is the fastest method for full repository downloads
+
+### 2. Concurrent File Processing (for Subdirectories)
+- Downloads files in parallel using multiple concurrent connections
+- Features intelligent retry logic with exponential backoff for failed downloads
+- Automatically adjusts concurrency based on failure rates to prevent GitHub API throttling
+- Creates a custom ZIP with just the content you requested, preserving folder structure
+- Shows real-time progress with auto-dismissing notifications
+- Intelligently processes directories recursively with proper path handling
+- Uses a chunking strategy to balance speed and reliability
+- Supports configurable file naming policies (full path or simple name)
+
+The extension automatically chooses the best method based on what you're trying to download. For full repositories, it uses the direct method; for subdirectories, it uses concurrent processing to download just the files you need.
 
 ## Customization
 
@@ -76,6 +102,9 @@ You can personalize the appearance of the extension through the settings page:
    - **Popup Background Color**: Customize the background color of the popup
    - **Button Text**: Change the text displayed on the download button
    - **Button Style**: Choose from different button styles (Default, Outline, Rounded, Pill)
+   - **ZIP File Naming Policy**: Select how subdirectory ZIP files are named:
+     - **Full Path**: More descriptive names with repository and full path (e.g., `owner_repo_path_to_subdirectory.zip`)
+     - **Simple Name**: Just use the subdirectory name (e.g., `subdirectory_name.zip`)
 4. Click "Save Settings" to apply your changes
 
 ![Settings Page](screenshots/settings.png)
@@ -89,7 +118,7 @@ You can personalize the appearance of the extension through the settings page:
 - **Subdirectory Downloads**: 
   - Analyzes the directory structure using GitHub's API
   - Recursively traverses all subdirectories
-  - Downloads each file individually
+  - Downloads each file individually with automatic retries
   - Preserves the correct directory structure
   - Packages everything into a ZIP file with the subdirectory as the root
   
@@ -97,7 +126,13 @@ You can personalize the appearance of the extension through the settings page:
   - Direct download via createObjectURL and download attribute
   - Chrome Download API for reliable downloading
   - Dedicated download page for handling larger files
-  - Individual file downloading as a last resort
+  - Individual file downloading with retry mechanism
+
+- **Reliable Networking**:
+  - Smart retry logic with exponential backoff for failed requests
+  - Timeout management to prevent hanging downloads
+  - Reduced concurrency on retries to avoid API rate limits
+  - Auto-dismissing notifications with progress information
 
 - **CSP-Compliant Architecture**:
   - Uses Chrome's scripting API to properly inject the JSZip library
@@ -124,9 +159,10 @@ You can personalize the appearance of the extension through the settings page:
 
 - **Content Security Policy errors**: The extension has multiple fallback methods for script injection
 - **Download fails with no files**: Make sure you have access to the repository (private repositories require login)
-- **Missing files**: Try refreshing the page before downloading
-- **API rate limits**: If you encounter GitHub API rate limits, wait a few minutes and try again
-- **Large repositories**: For very large repositories, the extension may take longer to process files
+- **Missing files**: The extension will automatically retry failed downloads, but some files may still be missing if they can't be accessed
+- **API rate limits**: The extension automatically reduces concurrent downloads when rate limits are detected
+- **Large repositories**: For very large repositories, consider downloading specific subdirectories instead of the entire repository
+- **Network issues**: The extension includes timeout handling and will retry downloads that fail due to network issues
 
 ## Privacy
 

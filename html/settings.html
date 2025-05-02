@@ -183,6 +183,21 @@
         </select>
       </div>
       
+      <div class="form-group">
+        <label>ZIP File Naming Policy:</label>
+        <div style="margin-top: 8px;">
+          <input type="radio" id="namingPolicyFull" name="namingPolicy" value="fullPath" checked>
+          <label for="namingPolicyFull" style="display: inline; font-weight: normal;">Full Path (owner_repo_path_to_subdirectory.zip)</label>
+        </div>
+        <div style="margin-top: 5px;">
+          <input type="radio" id="namingPolicySimple" name="namingPolicy" value="simpleName">
+          <label for="namingPolicySimple" style="display: inline; font-weight: normal;">Simple Name (subdirectory_name.zip)</label>
+        </div>
+        <div style="margin-top: 5px; font-style: italic; color: #666; font-size: 0.9em;">
+          Choose how ZIP files are named when downloading subdirectories
+        </div>
+      </div>
+      
       <div class="theme-preview">
         <h3>Preview</h3>
         <div class="preview-popup" id="previewPopup">

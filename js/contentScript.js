@@ -1,6 +1,120 @@
 // This content script runs in the context of GitHub pages
+// Configuration options
+const CONFIG = {
+  useOptimizedDownload: true,  // Set to false to force legacy download method
+  debugMode: true,             // Enable detailed logging
+  maxRepositorySizeMB: 200,    // Max repository size to use optimized method (in MB)
+  downloadTimeoutMs: 120000    // Timeout for repository download (120 seconds)
+};
+
 let jsZip = null;
 let jsZipLoaded = false;
+
+// Global reference to the status element
+let statusElement = null;
+
+// Initialize the status element for progress updates
+function initializeStatusElement() {
+  // Only create once
+  if (statusElement) return;
+  
+  // Create the status element with styled appearance
+  statusElement = document.createElement('div');
+  statusElement.className = 'github-repo-downloader-status';
+  statusElement.style.position = 'fixed';
+  statusElement.style.bottom = '20px';
+  statusElement.style.right = '20px';
+  statusElement.style.backgroundColor = '#0d1117';
+  statusElement.style.color = '#58a6ff';
+  statusElement.style.padding = '12px 16px';
+  statusElement.style.borderRadius = '6px';
+  statusElement.style.boxShadow = '0 4px 16px rgba(0, 0, 0, 0.24)';
+  statusElement.style.zIndex = '9999';
+  statusElement.style.fontSize = '14px';
+  statusElement.style.fontFamily = '-apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif';
+  statusElement.style.maxWidth = '400px';
+  statusElement.style.transition = 'opacity 0.3s ease-in-out';
+  statusElement.style.border = '1px solid #30363d';
+  statusElement.style.opacity = '1';
+  
+  // Add progress bar
+  const progressBar = document.createElement('div');
+  progressBar.className = 'progress-bar';
+  progressBar.style.height = '4px';
+  progressBar.style.width = '0%';
+  progressBar.style.backgroundColor = '#58a6ff';
+  progressBar.style.marginTop = '8px';
+  progressBar.style.borderRadius = '2px';
+  progressBar.style.transition = 'width 0.3s ease-in-out';
+  
+  // Add close button
+  const closeButton = document.createElement('span');
+  closeButton.textContent = '×';
+  closeButton.style.position = 'absolute';
+  closeButton.style.top = '8px';
+  closeButton.style.right = '12px';
+  closeButton.style.cursor = 'pointer';
+  closeButton.style.fontSize = '18px';
+  closeButton.style.color = '#8b949e';
+  
+  // Add event listener to close button
+  closeButton.addEventListener('click', () => {
+    document.body.removeChild(statusElement);
+    statusElement = null;
+  });
+  
+  // Add elements to the status element
+  statusElement.appendChild(closeButton);
+  statusElement.appendChild(document.createTextNode('Initializing download...'));
+  statusElement.appendChild(progressBar);
+  
+  // Add status element to the page
+  document.body.appendChild(statusElement);
+}
+
+// Send progress updates to the status element and background script
+function sendProgressUpdate(message, percentage = -1) {
+  console.log(`Progress update: ${message}`);
+  
+  // Update the UI status element
+  if (statusElement) {
+    // Update text content
+    const textNode = statusElement.childNodes[1];
+    textNode.textContent = message;
+    
+    // Update progress bar if percentage is provided
+    if (percentage >= 0) {
+      const progressBar = statusElement.querySelector('.progress-bar');
+      if (progressBar) {
+        progressBar.style.width = `${Math.min(100, percentage)}%`;
+      }
+    }
+    
+    // Auto-dismiss completed downloads after 5 seconds
+    if (message.includes("complete") || message.includes("initiated")) {
+      setTimeout(() => {
+        if (statusElement && statusElement.parentNode) {
+          statusElement.style.opacity = '0';
+          setTimeout(() => {
+            if (statusElement && statusElement.parentNode) {
+              statusElement.parentNode.removeChild(statusElement);
+              statusElement = null;
+            }
+          }, 300); // Wait for fade out animation
+        }
+      }, 5000); // 5 seconds
+    }
+  }
+  
+  // Also send message to popup if open
+  chrome.runtime.sendMessage({
+    action: "updateProgress",
+    message: message,
+    percentage: percentage
+  }).catch(() => {
+    // Ignore errors if popup isn't open
+  });
+}
 
 // Embed a minimal version of JSZip directly to avoid loading issues
 // This will act as a fallback if external loading fails
@@ -337,10 +451,17 @@ function addDownloadButtonToUI() {
     buttonElement.addEventListener('click', (event) => {
       event.preventDefault();
       console.log("Download button clicked");
-      downloadSubdirectory().catch(error => {
-        console.error("Download error:", error);
-        alert(`Download error: ${error.message}`);
-      });
+      
+      // Extract repository information from the current URL
+      const repoInfo = extractRepositoryInfo(window.location.href);
+      if (!repoInfo) {
+        console.error("Failed to extract repository information from URL");
+        alert("Unable to determine repository information from URL");
+        return;
+      }
+      
+      // Call downloadSubdirectory with the extracted repository information
+      downloadSubdirectory(repoInfo);
     });
     
     console.log("Download button added to GitHub UI with custom styling");
@@ -351,23 +472,18 @@ function addDownloadButtonToUI() {
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
   if (request.action === "downloadSubdirectory") {
     console.log("Download subdirectory request received");
-    // Start the download process
-    downloadSubdirectory()
-      .then((result) => {
-        console.log("Download completed successfully:", result);
-        sendResponse({ success: true, message: "Download complete!" });
-      })
-      .catch((error) => {
-        console.error("Download error:", error);
-        // Send error to background script
-        chrome.runtime.sendMessage({
-          action: "downloadError",
-          message: error.message || "Download failed"
-        });
-        sendResponse({ success: false, message: error.message });
-      });
-
-    // Return true to indicate we'll send a response asynchronously
+    
+    // Extract repository information from the current URL
+    const repoInfo = extractRepositoryInfo(window.location.href);
+    if (!repoInfo) {
+      console.error("Failed to extract repository information from URL");
+      sendResponse({ success: false, message: "Unable to determine repository information" });
+      return true;
+    }
+    
+    // Start the download process with the repository info
+    downloadSubdirectory(repoInfo);
+    sendResponse({ success: true, message: "Download started" });
     return true;
   }
 });
@@ -417,15 +533,6 @@ function extractRepositoryInfo(url) {
   }
 }
 
-// Function to send progress updates
-function sendProgressUpdate(message) {
-  console.log("Progress update:", message);
-  chrome.runtime.sendMessage({
-    action: "updateProgress",
-    message: message
-  }).catch(error => console.warn("Error sending progress update:", error));
-}
-
 // Function to check if we should use direct download
 async function shouldUseDirectDownload(repoInfo, subdirectoryPath) {
   // For repository root, we can always use direct download
@@ -438,14 +545,40 @@ async function shouldUseDirectDownload(repoInfo, subdirectoryPath) {
   return !!downloadBtn;
 }
 
-// Helper function to get API URL for GitHub contents
-function getApiUrl(repoInfo, path) {
-  return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${path || ''}?ref=${repoInfo.branch}`;
+// Generate raw content URL for a GitHub file
+function getRawContentUrl(repoInfo, filePath) {
+  // Clean up the file path to ensure it doesn't have leading slashes
+  const cleanPath = filePath.replace(/^\/+/, '');
+  
+  // Use the raw.githubusercontent.com domain for direct file access
+  return `https://raw.githubusercontent.com/${repoInfo.owner}/${repoInfo.repo}/${repoInfo.branch}/${cleanPath}`;
 }
 
-// Helper function to get a direct raw content URL for a file
-function getRawContentUrl(repoInfo, filePath) {
-  return `https://raw.githubusercontent.com/${repoInfo.owner}/${repoInfo.repo}/${repoInfo.branch}/${filePath}`;
+// Generate GitHub API URL for a file
+function getApiUrl(repoInfo, filePath) {
+  // Clean up the file path to ensure it doesn't have leading slashes
+  const cleanPath = filePath.replace(/^\/+/, '');
+  
+  // Properly encode path components for the API URL
+  const encodedPath = cleanPath.split('/').map(part => encodeURIComponent(part)).join('/');
+  
+  return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${encodedPath}?ref=${repoInfo.branch}`;
+}
+
+// Generate GitHub API URL for a directory
+function getDirectoryApiUrl(repoInfo, dirPath) {
+  // Clean up the directory path to ensure it doesn't have leading slashes
+  const cleanPath = dirPath.replace(/^\/+/, '').replace(/\/+$/, '');
+  
+  // For root directory, don't include the path parameter
+  if (!cleanPath) {
+    return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents?ref=${repoInfo.branch}`;
+  }
+  
+  // Properly encode path components for the API URL
+  const encodedPath = cleanPath.split('/').map(part => encodeURIComponent(part)).join('/');
+  
+  return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${encodedPath}?ref=${repoInfo.branch}`;
 }
 
 // Try to download using GitHub's native download button if available
@@ -510,831 +643,751 @@ function tryDirectDownload(repoInfo) {
   }
 }
 
-// Download a file from GitHub
-async function downloadFile(repoInfo, filePath) {
-  try {
-    console.log(`Downloading file: ${filePath}, URL: ${getRawContentUrl(repoInfo, filePath)}`);
-    
-    // First try direct raw content URL
-    const directUrl = getRawContentUrl(repoInfo, filePath);
-    
-    let response = await fetch(directUrl, {
-      method: 'GET',
-      cache: 'no-store',
-      headers: {
-        'Accept': '*/*'
+// Download a file from GitHub with retries
+async function downloadFile(repoInfo, filePath, maxRetries = 3) {
+  let retryCount = 0;
+  let lastError = null;
+  
+  while (retryCount <= maxRetries) {
+    try {
+      if (retryCount > 0) {
+        console.log(`Retry #${retryCount} for file: ${filePath}`);
+      } else {
+        console.log(`Downloading file: ${filePath}`);
       }
-    });
-    
-    // If that fails, try alternative methods
-    if (!response.ok) {
-      console.warn(`Direct download failed (${response.status}), trying API...`);
+      
+      // First try direct raw content URL
+      const directUrl = getRawContentUrl(repoInfo, filePath);
+      
+      // Use a timeout to prevent hanging requests
+      const controller = new AbortController();
+      const signal = controller.signal;
+      const timeoutId = setTimeout(() => controller.abort(), 20000); // 20 second timeout
+      
+      try {
+        const response = await fetch(directUrl, {
+          method: 'GET',
+          cache: 'no-store',
+          headers: {
+            'Accept': '*/*'
+          },
+          signal: signal
+        });
+        
+        clearTimeout(timeoutId);
+        
+        if (response.ok) {
+          // Get file content as ArrayBuffer for binary support
+          const fileData = await response.arrayBuffer();
+          console.log(`Downloaded ${filePath.split('/').pop()}, size: ${fileData.byteLength} bytes`);
+          return fileData;
+        }
+        
+        // If direct download fails, try the GitHub API
+        console.warn(`Direct download failed (${response.status}), trying API...`);
+      } catch (fetchError) {
+        clearTimeout(timeoutId);
+        console.warn(`Fetch error for direct URL: ${fetchError.message}`);
+        // Continue to API method
+      }
       
       // Try the GitHub API to get file info
       const apiUrl = getApiUrl(repoInfo, filePath);
-      const apiResponse = await fetch(apiUrl);
       
-      if (!apiResponse.ok) {
-        console.error(`API request failed: ${apiResponse.status}`);
-        throw new Error(`Failed to get file info from GitHub API (${apiResponse.status})`);
-      }
+      const apiController = new AbortController();
+      const apiSignal = apiController.signal;
+      const apiTimeoutId = setTimeout(() => apiController.abort(), 20000); // 20 second timeout
       
-      const fileInfo = await apiResponse.json();
-      if (!fileInfo.download_url) {
-        console.error("API response missing download_url:", fileInfo);
-        throw new Error("File download URL not available");
-      }
-      
-      // Try the download URL from API response
-      console.log(`Trying download URL from API: ${fileInfo.download_url}`);
-      response = await fetch(fileInfo.download_url, {
-        method: 'GET',
-        cache: 'no-store'
-      });
-      
-      if (!response.ok) {
-        throw new Error(`Failed to download file (${response.status})`);
-      }
-    }
-    
-    // Get file content as ArrayBuffer for binary support
-    const fileData = await response.arrayBuffer();
-    console.log(`Downloaded ${filePath.split('/').pop()}, size: ${fileData.byteLength} bytes`);
-    
-    return fileData;
-  } catch (error) {
-    console.error(`Error downloading file ${filePath}:`, error);
-    throw error;
-  }
-}
-
-// Main function to download a subdirectory
-async function downloadSubdirectory() {
-  console.log('Initiating download of subdirectory...');
-  console.time('Download operation');
-  
-  try {
-    // Extract repository information from the current URL
-    const repoInfo = extractRepositoryInfo(window.location.href);
-    if (!repoInfo) {
-      console.error('Failed to parse repository information from URL');
-      return { success: false, message: 'Could not determine repository information from URL' };
-    }
-    
-    // Get current directory path from URL
-    console.log('Repository info:', repoInfo);
-    
-    // Only try direct download if we're not in a subdirectory
-    if (!repoInfo.subdirectory || repoInfo.subdirectory.trim() === '') {
-      // First try the native GitHub download button if available
-      if (tryDirectDownload(repoInfo)) {
-        return { success: true, message: 'Using GitHub native download' };
-      }
-    } else {
-      console.log(`Subdirectory detected: ${repoInfo.subdirectory}, using manual ZIP creation`);
-    }
-    
-    // If native download isn't available or fails, proceed with manual download
-    console.log('Native download not available, initiating manual download');
-    
-    // Attempt to load JSZip - this will provide a proper JSZip class
-    console.log('Loading JSZip library using CSP-compliant method...');
-    let JSZipClass;
-    
-    try {
-      // Load JSZip first before we try to use it
-      JSZipClass = await loadJSZip();
-      console.log('JSZip loaded successfully via promise:', !!JSZipClass);
-    } catch (jsZipError) {
-      console.error('Error loading JSZip:', jsZipError);
-      
-      // Show user-friendly error message with retry option
-      if (confirm('There was a problem loading the ZIP library due to browser security restrictions. Would you like to try an alternative method?')) {
-        // Use a simple fallback method
-        console.log('Using fallback minimal JSZip implementation');
-        // This creates a constructor from our embedded minimal implementation
-        try {
-          const MinimalConstructor = new Function('return ' + JSZipMinimal + '; return JSZipMinimal;')();
-          JSZipClass = MinimalConstructor;
-          console.log('Using minimal JSZip fallback implementation');
-        } catch (fallbackError) {
-          console.error('Error creating fallback JSZip implementation:', fallbackError);
-          alert('Failed to use fallback ZIP method. You may need to reload the page or check extension permissions.');
-          return { success: false, message: 'Failed to load ZIP library: ' + jsZipError.message };
-        }
-      } else {
-        return { success: false, message: 'Download cancelled' };
-      }
-    }
-    
-    // Create a new JSZip instance
-    console.log('Creating new JSZip instance...');
-    let zip;
-    try {
-      // Check if JSZipClass is a proper constructor
-      if (typeof JSZipClass === 'function') {
-        zip = new JSZipClass();
-        console.log('Created JSZip instance from provided constructor');
-      } else if (typeof JSZip === 'function') { 
-        // Global JSZip might be available if script injection succeeded
-        zip = new JSZip();
-        console.log('Created JSZip instance from global JSZip');
-      } else {
-        throw new Error('No valid JSZip constructor available');
-      }
-    } catch (error) {
-      console.error('Failed to create JSZip instance:', error);
-      
-      // One last attempt with a simple wrapper
       try {
-        console.log('Attempting simple wrapper as last resort');
-        // Create a very simple wrapper that behaves like JSZip minimally
-        zip = {
-          files: {},
-          folder: function(name) {
-            const self = this;
-            return {
-              file: function(filename, content) {
-                const path = name ? name + '/' + filename : filename;
-                self.files[path] = content;
-                return this;
-              },
-              folder: function(subName) {
-                const fullPath = name ? name + '/' + subName : subName;
-                return {
-                  file: function(filename, content) {
-                    const path = fullPath + '/' + filename;
-                    self.files[path] = content;
-                    return this;
-                  }
-                };
-              }
-            };
-          },
-          file: function(name, content) {
-            this.files[name] = content;
-            return this;
-          },
-          generateAsync: function(options, onUpdate) {
-            return new Promise((resolve) => {
-              // Just make a text file with file list as fallback
-              const fileList = Object.keys(this.files).map(name => ({
-                name,
-                size: this.files[name].byteLength || this.files[name].length || 0
-              }));
-              
-              const metadata = {
-                message: "ZIP creation failed. Individual files list provided.",
-                files: fileList
-              };
-              
-              // Show progress
-              if (typeof onUpdate === 'function') {
-                onUpdate({ percent: 50 });
-                setTimeout(() => onUpdate({ percent: 100 }), 500);
-              }
-              
-              // Create blob with JSON data
-              const blob = new Blob([JSON.stringify(metadata, null, 2)], 
-                                   { type: 'application/json' });
-              resolve(blob);
-            });
-          }
-        };
-        console.log('Created simple JSZip wrapper as fallback');
-      } catch (wrapperError) {
-        console.error('Even simple wrapper failed:', wrapperError);
-        alert('Could not create ZIP file. Please try downloading files individually or reload the page.');
-        return { success: false, message: 'Failed to create ZIP file: ' + error.message };
-      }
-    }
-    
-    // Try downloading the files using GitHub API
-    try {
-      let currentPath = repoInfo.subdirectory || '';
-      let directoryName = currentPath ? 
-                         currentPath.split('/').pop() : 
-                         repoInfo.repo;
-      
-      // Start the download process
-      console.log(`Starting download for ${directoryName}`);
-      sendProgressUpdate(`Starting download for ${directoryName}...`);
-      
-      let completedFiles = 0;
-      let failedFiles = 0;
-      let totalFiles = 0;
-      
-      // Process the directory
-      const result = await processDirectory(
-        repoInfo, 
-        currentPath,
-        zip,
-        (status) => {
-          if (status.totalFiles) totalFiles = status.totalFiles;
-          if (status.completedFiles) completedFiles = status.completedFiles;
-          if (status.failedFiles) failedFiles = status.failedFiles;
-        }
-      );
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to process directory');
-      }
-      
-      // Generate ZIP and handle download
-      console.log(`Download processing completed. Files processed: ${completedFiles}, failed: ${failedFiles}`);
-      
-      // This is the main function that will generate and download the ZIP file
-      return await generateAndDownloadZip(zip, directoryName, completedFiles, failedFiles, totalFiles);
-      
-    } catch (error) {
-      console.error('Error downloading directory:', error);
-      sendProgressUpdate('Download failed: ' + error.message);
-      return { success: false, message: error.message };
-    }
-  } catch (error) {
-    console.error('Error in downloadSubdirectory:', error);
-    console.timeEnd('Download operation');
-    return { success: false, message: error.message };
-  } finally {
-    console.timeEnd('Download operation');
-  }
-}
-
-// Process a directory and its contents recursively
-async function processDirectory(repoInfo, path, zip, progressCallback) {
-  try {
-    sendProgressUpdate(`Processing directory: ${path || 'root'}`);
-    console.log(`Processing directory: ${path || 'root'}`);
-    
-    // Fetch directory contents from GitHub API
-    const apiUrl = getApiUrl(repoInfo, path);
-    console.log(`Fetching directory contents from API: ${apiUrl}`);
-    
-    const response = await fetch(apiUrl);
-    if (!response.ok) {
-      const errorText = await response.text();
-      console.error(`API request failed: ${response.status} ${response.statusText}`, errorText);
-      throw new Error(`GitHub API request failed (${response.status}): ${response.statusText}`);
-    }
-    
-    const items = await response.json();
-    console.log(`API returned ${items.length} items for ${path || 'root'}`);
-    
-    // Update total count
-    progressCallback({ totalFiles: items.length });
-    
-    // Process each item in the directory
-    let completedFiles = 0;
-    let failedFiles = 0;
-    
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const itemPath = path ? `${path}/${item.name}` : item.name;
-      
-      console.log(`Processing ${item.type}: ${itemPath} (${i+1}/${items.length})`);
-      sendProgressUpdate(`Processing ${item.type}: ${item.name} (${i+1}/${items.length})`);
-      
-      if (item.type === 'file') {
-        try {
-          // Download the file
-          sendProgressUpdate(`Downloading: ${item.name} (${i+1} of ${items.length})`);
-          
-          const fileData = await downloadFile(repoInfo, itemPath);
-          if (!fileData) {
-            throw new Error(`Failed to download ${itemPath}`);
-          }
-          
-          // Calculate the relative path to use in the ZIP
-          // If we're downloading a subdirectory, we need to remove the subdirectory path prefix
-          // so we don't get nested subdirectory folders
-          let relativePath = itemPath;
-          
-          if (repoInfo.subdirectory) {
-            // If we have a subdirectory specified, use just the directory name as the root folder
-            const baseDir = repoInfo.subdirectory.split('/').pop();
-            
-            // Check if the current path starts with the subdirectory path
-            if (itemPath.startsWith(repoInfo.subdirectory)) {
-              // Replace the subdirectory path with just the directory name
-              relativePath = baseDir + itemPath.substring(repoInfo.subdirectory.length);
-            }
-          }
-          
-          console.log(`Adding file to ZIP: ${relativePath}`);
-          
-          // Add file to the zip
-          zip.file(relativePath, fileData);
-          console.log(`Added ${itemPath} to ZIP, size: ${fileData.byteLength} bytes`);
-          
-          completedFiles++;
-          progressCallback({ completedFiles });
-        } catch (error) {
-          console.error(`Error processing file ${itemPath}:`, error);
-          failedFiles++;
-          progressCallback({ failedFiles });
-        }
-      } else if (item.type === 'dir') {
-        console.log(`Processing directory: ${itemPath}`);
+        const apiResponse = await fetch(apiUrl, { signal: apiSignal });
+        clearTimeout(apiTimeoutId);
         
-        // Process the subdirectory
+        if (!apiResponse.ok) {
+          if (apiResponse.status === 404) {
+            console.error(`File not found: ${filePath}`);
+            throw new Error(`File not found: ${filePath}`);
+          } else {
+            console.error(`API request failed: ${apiResponse.status}`);
+            throw new Error(`GitHub API error (${apiResponse.status})`);
+          }
+        }
+        
+        const fileInfo = await apiResponse.json();
+        
+        // Check if we got a proper file response
+        if (!fileInfo || !fileInfo.download_url) {
+          console.error("API response missing download_url:", fileInfo);
+          throw new Error("File download URL not available");
+        }
+        
+        // Try the download URL from API response
+        console.log(`Trying download URL from API: ${fileInfo.download_url}`);
+        
+        const downloadController = new AbortController();
+        const downloadSignal = downloadController.signal;
+        const downloadTimeoutId = setTimeout(() => downloadController.abort(), 20000); // 20 second timeout
+        
         try {
-          const subDirResult = await processDirectory(repoInfo, itemPath, zip, (subProgress) => {
-            // Update counts from subdirectory
-            if (subProgress.completedFiles) {
-              completedFiles += subProgress.completedFiles;
-              progressCallback({ completedFiles });
-            }
-            if (subProgress.failedFiles) {
-              failedFiles += subProgress.failedFiles;
-              progressCallback({ failedFiles });
-            }
-            if (subProgress.totalFiles) {
-              progressCallback({ 
-                totalFiles: (progressCallback.totalFiles || 0) + subProgress.totalFiles
-              });
-            }
+          const downloadResponse = await fetch(fileInfo.download_url, {
+            method: 'GET',
+            cache: 'no-store',
+            signal: downloadSignal
           });
           
-          if (!subDirResult.success) {
-            console.warn(`Warning processing subdirectory ${itemPath}: ${subDirResult.message}`);
+          clearTimeout(downloadTimeoutId);
+          
+          if (!downloadResponse.ok) {
+            throw new Error(`Failed to download file (${downloadResponse.status})`);
           }
-        } catch (subDirError) {
-          console.error(`Error processing subdirectory ${itemPath}:`, subDirError);
-          failedFiles++;
-          progressCallback({ failedFiles });
+          
+          // Get file content as ArrayBuffer for binary support
+          const fileData = await downloadResponse.arrayBuffer();
+          console.log(`Downloaded ${filePath.split('/').pop()}, size: ${fileData.byteLength} bytes`);
+          return fileData;
+        } catch (downloadError) {
+          clearTimeout(downloadTimeoutId);
+          throw downloadError; // Re-throw to trigger retry
+        }
+      } catch (apiError) {
+        clearTimeout(apiTimeoutId);
+        throw apiError; // Re-throw to trigger retry
+      }
+    } catch (error) {
+      lastError = error;
+      retryCount++;
+      
+      if (retryCount <= maxRetries) {
+        // Exponential backoff: wait longer between each retry
+        const delay = Math.min(1000 * Math.pow(2, retryCount), 10000);
+        console.warn(`Download failed for ${filePath}, retrying in ${delay}ms: ${error.message}`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        console.error(`Failed to download ${filePath} after ${maxRetries} retries:`, error);
+      }
+    }
+  }
+  
+  // All retries failed
+  throw lastError || new Error(`Failed to download ${filePath} after ${maxRetries} retries`);
+}
+
+// Handle subdirectory download with retry logic
+async function handleSubdirectoryDownload(repoInfo) {
+  console.log(`Downloading subdirectory: ${repoInfo.subdirectory} from ${repoInfo.owner}/${repoInfo.repo}`);
+  
+  try {
+    sendProgressUpdate('Preparing to download subdirectory...');
+    
+    // Get JSZip instance - try to use existing one or load it
+    let zip;
+    try {
+      if (typeof JSZip === 'function') {
+        console.log("Using existing JSZip instance");
+        zip = new JSZip();
+      } else {
+        console.log("Loading JSZip...");
+        let JSZipClass = await loadJSZip();
+        zip = new JSZipClass();
+      }
+    } catch (jsZipError) {
+      console.error("JSZip loading error:", jsZipError);
+      sendProgressUpdate("Error loading ZIP library. Trying fallback...");
+      
+      // Attempt to use external JSZip library
+      try {
+        await loadScript(chrome.runtime.getURL("lib/jszip.min.js"));
+        console.log("External JSZip library loaded");
+        if (typeof JSZip === 'function') {
+          zip = new JSZip();
+        } else {
+          throw new Error("JSZip not available after loading");
+        }
+      } catch (externalError) {
+        console.error("External JSZip loading error:", externalError);
+        sendProgressUpdate("Error loading libraries. Trying CDN fallback...");
+        
+        // Try loading from CDN as last resort
+        try {
+          await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js");
+          console.log("JSZip loaded from CDN");
+          if (typeof JSZip === 'function') {
+            zip = new JSZip();
+          } else {
+            throw new Error("JSZip not available after CDN loading");
+          }
+        } catch (cdnError) {
+          console.error("CDN JSZip loading error:", cdnError);
+          throw new Error("Failed to load ZIP library after multiple attempts");
         }
       }
     }
     
-    return { 
-      success: true, 
-      completedFiles, 
-      failedFiles,
-      totalFiles: items.length
+    console.log("JSZip ready for use");
+    
+    // Variables for tracking progress
+    let totalFiles = 0;
+    let completedFiles = 0;
+    let failedFiles = 0;
+    let currentOperation = '';
+    let retryCount = 0;
+    const maxRetries = 2;
+    
+    // Update progress function
+    const updateProgress = (progress) => {
+      if (!progress) return;
+      
+      if (progress.type === 'progress') {
+        completedFiles = progress.completed || completedFiles;
+        failedFiles = progress.failed || failedFiles;
+        totalFiles = progress.total || totalFiles;
+        currentOperation = progress.currentOperation || currentOperation;
+        
+        // Calculate percentage if we have total files
+        let percentage = 0;
+        if (totalFiles > 0) {
+          percentage = Math.round((completedFiles / totalFiles) * 100);
+        }
+        
+        let statusText = `Downloaded ${completedFiles}/${totalFiles} files`;
+        if (failedFiles > 0) {
+          statusText += ` (${failedFiles} failed)`;
+        }
+        
+        if (retryCount > 0) {
+          statusText += ` - Retry #${retryCount}`;
+        }
+        
+        if (percentage > 0) {
+          statusText += ` - ${percentage}% complete`;
+        }
+        
+        sendProgressUpdate(statusText, percentage);
+        
+        if (currentOperation) {
+          console.log(currentOperation);
+        }
+      }
     };
+    
+    // Try to download the subdirectory with retries if needed
+    let downloadResult = null;
+    let retry = true;
+    
+    while (retry && retryCount <= maxRetries) {
+      try {
+        // If this is a retry, adjust concurrency to avoid rate limiting
+        const concurrency = retryCount === 0 ? 10 : Math.max(3, 10 - (retryCount * 3));
+        
+        if (retryCount > 0) {
+          sendProgressUpdate(`Retry #${retryCount}: Downloading remaining files with reduced concurrency...`);
+          console.log(`Retry #${retryCount}: Using concurrency of ${concurrency}`);
+        }
+        
+        // Process the directory with our improved function
+        downloadResult = await processDirectoryConcurrent(
+          repoInfo,
+          repoInfo.subdirectory,
+          zip,
+          repoInfo.subdirectory,
+          updateProgress,
+          concurrency
+        );
+        
+        // Update our progress tracking
+        completedFiles = downloadResult.completedFiles;
+        failedFiles = downloadResult.failedFiles;
+        totalFiles = downloadResult.totalFiles;
+        
+        // If we have no failed files or we've hit max retries, don't retry again
+        retry = failedFiles > 0 && retryCount < maxRetries;
+        
+        if (retry) {
+          retryCount++;
+        } else {
+          // Break the loop if we're done
+          break;
+        }
+      } catch (error) {
+        console.error("Error during directory processing:", error);
+        sendProgressUpdate(`Error: ${error.message}`);
+        
+        // Increment retry counter and try again if we haven't hit max retries
+        if (retryCount < maxRetries) {
+          retryCount++;
+          sendProgressUpdate(`Retrying download (${retryCount}/${maxRetries})...`);
+        } else {
+          // Give up after max retries
+          retry = false;
+          throw error;
+        }
+      }
+    }
+    
+    // Generate the ZIP file
+    sendProgressUpdate(`Creating ZIP file...`);
+    console.log(`Creating ZIP file with ${completedFiles} files`);
+    
+    const zipBlob = await zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    }, (metadata) => {
+      sendProgressUpdate(`Creating ZIP: ${Math.round(metadata.percent)}%`);
+    });
+    
+    // Get naming policy setting
+    const defaultSettings = {
+      namingPolicy: 'fullPath' // Default to full path naming
+    };
+    
+    // Determine the file name based on the naming policy
+    let fileName;
+    try {
+      const settings = await new Promise(resolve => {
+        chrome.storage.sync.get(defaultSettings, resolve);
+      });
+      
+      if (settings.namingPolicy === 'simpleName') {
+        // Simple name: just use the last part of the subdirectory path
+        const subdirName = repoInfo.subdirectory.split('/').pop();
+        fileName = `${subdirName}.zip`;
+      } else {
+        // Full path: use the complete path with owner, repo, and subdirectory
+        fileName = `${repoInfo.owner}_${repoInfo.repo}_${repoInfo.subdirectory.replace(/\//g, '_')}.zip`;
+      }
+      console.log(`Using naming policy '${settings.namingPolicy}' for ZIP file: ${fileName}`);
+    } catch (error) {
+      console.error("Error getting naming policy setting:", error);
+      // Fallback to full path naming on error
+      fileName = `${repoInfo.owner}_${repoInfo.repo}_${repoInfo.subdirectory.replace(/\//g, '_')}.zip`;
+    }
+    
+    // Create download link
+    try {
+      console.log(`Creating download for ZIP file (${zipBlob.size} bytes)`);
+      
+      // Try to create a direct download link
+      const url = URL.createObjectURL(zipBlob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = fileName;
+      a.style.display = 'none';
+      document.body.appendChild(a);
+      a.click();
+      
+      // Clean up the URL object
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 100);
+      
+      if (failedFiles > 0) {
+        sendProgressUpdate(`Download complete with ${failedFiles} missing files. Archive size: ${formatFileSize(zipBlob.size)}`);
+      } else {
+        sendProgressUpdate(`Download complete! Archive size: ${formatFileSize(zipBlob.size)}`);
+      }
+    } catch (downloadError) {
+      console.error("Error creating download link:", downloadError);
+      
+      // Fall back to Chrome's download API
+      sendProgressUpdate("Using Chrome downloads API as fallback...");
+      
+      try {
+        const reader = new FileReader();
+        reader.onload = function() {
+          const dataUrl = reader.result;
+          chrome.runtime.sendMessage({
+            action: "downloadBlob",
+            dataUrl: dataUrl,
+            filename: fileName
+          }, response => {
+            if (response.success) {
+              sendProgressUpdate("Download initiated through Chrome API.");
+            } else {
+              sendProgressUpdate(`Error: ${response.error}`);
+            }
+          });
+        };
+        reader.readAsDataURL(zipBlob);
+      } catch (chromeError) {
+        console.error("Error using Chrome download API:", chromeError);
+        sendProgressUpdate(`Failed to download: ${chromeError.message}`);
+      }
+    }
   } catch (error) {
-    console.error(`Error processing directory ${path}:`, error);
-    return { success: false, message: error.message };
+    console.error("Subdirectory download failed:", error);
+    sendProgressUpdate(`Download failed: ${error.message}`);
   }
 }
 
-// Function to safely download a blob with proper error handling
-async function downloadBlobSafely(blob, filename) {
+// Main function to handle repository downloads
+function downloadSubdirectory(repoInfo) {
+  console.log("Download initiated with repo info:", repoInfo);
+  
+  // If not provided, try to extract repository information from the current URL
+  if (!repoInfo) {
+    repoInfo = extractRepositoryInfo(window.location.href);
+    console.log("Extracted repository info from URL:", repoInfo);
+  }
+  
+  // Validate repository information
+  if (!repoInfo || !repoInfo.owner || !repoInfo.repo) {
+    const errorMsg = "Error: Repository information is incomplete or not available.";
+    console.error(errorMsg, repoInfo);
+    sendProgressUpdate(errorMsg);
+    return;
+  }
+  
+  // Set a global status element for progress updates
+  initializeStatusElement();
+  
+  // Check if we're downloading a subdirectory or the whole repository
+  if (repoInfo.subdirectory && repoInfo.subdirectory.trim() !== '') {
+    // We're downloading a specific subdirectory
+    console.log(`Detected subdirectory download: ${repoInfo.subdirectory}`);
+    sendProgressUpdate(`Preparing to download subdirectory: ${repoInfo.subdirectory}`);
+    
+    // Use our fast concurrent download method
+    handleSubdirectoryDownload(repoInfo);
+  } else {
+    // We're downloading the entire repository - use GitHub's native download
+    console.log("Detected full repository download");
+    sendProgressUpdate("Downloading full repository using GitHub's native download");
+    
+    // Try to find and click GitHub's download button first
+    const downloadButton = document.querySelector('a[data-turbo-frame="repo-content-turbo-frame"][href$=".zip"]');
+    
+    if (downloadButton) {
+      console.log("Found GitHub download button, clicking it");
+      downloadButton.click();
+      sendProgressUpdate("Download initiated through GitHub's native download");
+      return;
+    }
+    
+    // If no button found, construct a direct download link
+    const archiveUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}/archive/refs/heads/${repoInfo.branch}.zip`;
+    console.log(`Using direct download URL: ${archiveUrl}`);
+    
+    // Use our background script to download the file
+    chrome.runtime.sendMessage({
+      action: "downloadRepositoryZip",
+      url: archiveUrl,
+      fileName: `${repoInfo.owner}_${repoInfo.repo}.zip`
+    }, response => {
+      if (response && response.success) {
+        sendProgressUpdate("Download initiated");
+      } else {
+        const errorMessage = response?.error || "Download failed";
+        console.error("Download error:", errorMessage);
+        sendProgressUpdate(`Error: ${errorMessage}`);
+      }
+    });
+  }
+}
+
+// Function to open the download page with specified parameters
+function openDownloadPage(blobId, filename, fileSize) {
   return new Promise((resolve, reject) => {
     try {
-      // Create blob URL
-      const blobUrl = URL.createObjectURL(blob);
-      console.log(`Created blob URL for download: ${blobUrl}`);
+      // Construct the download page URL with parameters
+      const downloadUrl = chrome.runtime.getURL("html/download.html") + 
+        `?blobId=${encodeURIComponent(blobId)}` +
+        `&fileName=${encodeURIComponent(filename)}` +
+        `&fileSize=${encodeURIComponent(fileSize)}` +
+        `&autoStart=true`;
       
-      // Try using chrome.downloads API through the background script first
+      console.log("Opening download page:", downloadUrl);
+      
+      // Open the download page in a new tab
       chrome.runtime.sendMessage({
-        action: "downloadBlob",
-        url: blobUrl,
-        filename: filename
-      }).then(response => {
-        if (response && response.success) {
-          console.log("Download initiated through downloads API");
-          
-          // Set a delay before revoking the URL to ensure Chrome has accessed it
-          setTimeout(() => {
-            try {
-              URL.revokeObjectURL(blobUrl);
-              console.log(`Revoked blob URL: ${blobUrl}`);
-            } catch (revokeError) {
-              console.warn(`Error revoking blob URL: ${revokeError.message}`);
-            }
-            resolve(true);
-          }, 30000); // Give Chrome 30 seconds to access the URL
+        action: "openTab",
+        url: downloadUrl
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error("Error opening download page:", chrome.runtime.lastError);
+          reject(chrome.runtime.lastError);
+        } else if (response && response.success) {
+          resolve(response);
         } else {
-          // Fall back to <a> tag download method
-          console.log("Downloads API failed, falling back to link method");
-          fallbackToLinkMethod();
+          reject(new Error("Failed to open download page"));
         }
-      }).catch(error => {
-        console.error("Error with downloads API:", error);
-        fallbackToLinkMethod();
       });
-      
-      // Fallback download method using <a> tag
-      function fallbackToLinkMethod() {
-        // Create download link
-        const a = document.createElement('a');
-        a.href = blobUrl;
-        a.download = filename;
-        a.style.display = 'none';
-        
-        // Add to document and click
-        document.body.appendChild(a);
-        
-        // Track download attempt
-        let downloadAttempted = false;
-        
-        a.addEventListener('click', () => {
-          downloadAttempted = true;
-          console.log(`Download initiated for ${filename}`);
-          
-          // Remove the link after a delay
-          setTimeout(() => {
-            if (document.body.contains(a)) {
-              document.body.removeChild(a);
-            }
-            
-            // Keep the URL alive longer to prevent "File wasn't available" error
-            setTimeout(() => {
-              try {
-                URL.revokeObjectURL(blobUrl);
-                console.log(`Revoked blob URL: ${blobUrl}`);
-              } catch (revokeError) {
-                console.warn(`Error revoking blob URL: ${revokeError.message}`);
-              }
-              resolve(true);
-            }, 30000); // Wait 30 seconds before revoking
-          }, 1000);
-        });
-        
-        // Click the link
-        a.click();
-        
-        // Check if download was attempted
-        setTimeout(() => {
-          if (!downloadAttempted) {
-            console.warn(`Download may not have started for ${filename}`);
-            
-            // Try in a new window as a last resort
-            try {
-              const newWindow = window.open(blobUrl, '_blank');
-              if (newWindow) {
-                console.log("Opened download in new window");
-                setTimeout(() => newWindow.close(), 5000);
-              } else {
-                console.warn("Popup was blocked");
-              }
-            } catch (windowError) {
-              console.error("New window method failed:", windowError);
-            }
-            
-            // We've tried everything
-            resolve(false);
-          }
-        }, 2000);
-      }
     } catch (error) {
-      console.error("Download error:", error);
+      console.error("Error constructing download page URL:", error);
       reject(error);
     }
   });
 }
 
-// Generate the zip file and handle downloading
-async function generateAndDownloadZip(zip, directoryName, completedFiles, failedFiles, totalFiles) {
+// Download the full repository ZIP using GitHub's native download URL via background script
+async function downloadRepositoryZip(repoInfo) {
   try {
-    sendProgressUpdate(`Creating ZIP file with ${completedFiles} files...`);
-    console.log("Generating ZIP with options...");
+    console.log(`Downloading full repository ZIP for ${repoInfo.owner}/${repoInfo.repo}:${repoInfo.branch}`);
     
-    // Debug: log the structure of files in ZIP 
-    console.log("Files in ZIP before generation:");
-    if (zip.files) {
-      Object.keys(zip.files).forEach(file => {
-        console.log(` - ${file}`);
-      });
-    }
+    // Construct GitHub's native download URL for the repository
+    const repoZipUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}/archive/refs/heads/${repoInfo.branch}.zip`;
+    console.log("Repository ZIP URL:", repoZipUrl);
     
-    // Check if we're using the simplified wrapper by checking for a key function
-    const isRealJSZip = zip && typeof zip.generateAsync === 'function' && 
-                        !zip.constructor.toString().includes('SimpleJSZip');
-    
-    console.log("ZIP implementation check:", {
-      hasZip: !!zip,
-      isRealJSZip: isRealJSZip,
-      hasGenerateAsync: zip && typeof zip.generateAsync === 'function',
-      zipType: zip && zip.constructor ? zip.constructor.name : 'Unknown'
-    });
-    
-    if (!isRealJSZip) {
-      console.warn("Not using real JSZip - attempting to load JSZip again");
-      
-      // Try to load JSZip one more time
-      try {
-        const JSZipClass = await loadJSZip();
-        
-        if (JSZipClass) {
-          console.log("Successfully loaded JSZip from window global");
-          
-          // Create a new proper JSZip instance
-          const newZip = new JSZipClass();
-          
-          // Copy files from old zip to new zip if possible
-          if (zip && zip.files) {
-            console.log("Copying files from old zip to new zip");
-            
-            for (const [path, fileData] of Object.entries(zip.files)) {
-              try {
-                if (fileData && (fileData.async || fileData._data)) {
-                  // If it's a valid JSZip file object with data
-                  console.log(`Adding ${path} to new ZIP`);
-                  let fileContent = fileData._data || fileData.async();
-                  
-                  // If it's a function, call it
-                  if (typeof fileContent === 'function') {
-                    fileContent = await fileContent();
-                  }
-                  
-                  newZip.file(path, fileContent);
-                }
-              } catch (fileError) {
-                console.error(`Error copying file ${path}:`, fileError);
-              }
-            }
-          }
-          
-          // Replace old zip with the new one
-          zip = newZip;
-        } else {
-          throw new Error("JSZip not available after loading");
-        }
-      } catch (error) {
-        console.error("Failed to load real JSZip:", error);
-        // Continue with the original zip as fallback
-      }
-    }
-    
-    // Generate zip with options that optimize for browser compatibility
-    const zipOptions = {
-      type: "blob",
-      compression: "DEFLATE",
-      compressionOptions: {
-        level: 5  // Mid-level compression (1-9, where 9 is highest)
-      }
-    };
-    
-    // Add logging to check what's in the zip before generating
-    console.log("Files in ZIP before generation:", zip.files ? Object.keys(zip.files).length : "unknown");
-    
-    // Generate ZIP and track progress
-    const zipBlob = await zip.generateAsync(zipOptions, metadata => {
-      if (metadata.percent % 10 === 0) {
-        sendProgressUpdate(`Creating ZIP file: ${Math.round(metadata.percent)}% complete...`);
-      }
-    });
-
-    console.log("ZIP generated successfully, size:", zipBlob.size, "bytes");
-    const fileSizeMB = (zipBlob.size / (1024 * 1024)).toFixed(2);
-    
-    // If zip is suspiciously small, warn user
-    if (zipBlob.size < 1000 && completedFiles > 0) {
-      console.warn("Generated ZIP is suspiciously small!", { size: zipBlob.size, fileCount: completedFiles });
-      
-      // Try one last time to create a direct download for each file
-      if (confirm("The generated ZIP file appears to be corrupt or incomplete. Would you like to download files individually instead?")) {
-        const repoInfo = extractRepositoryInfo(window.location.href);
-        if (repoInfo) {
-          await downloadFilesIndividually(repoInfo, repoInfo.subdirectory || "");
-          return { success: true, method: "individual_files" };
-        }
-      }
-    }
-    
-    // Now initiate the download using the blob URL method
-    sendProgressUpdate(`Downloading ${directoryName}.zip (${fileSizeMB} MB)...`);
-    
-    try {
-      // Create a blob URL for direct download
-      const blobUrl = URL.createObjectURL(zipBlob);
-      console.log("Created blob URL for download:", blobUrl);
-      
-      // Create a download link for direct downloading
-      const downloadLink = document.createElement('a');
-      downloadLink.href = blobUrl;
-      downloadLink.download = `${directoryName}.zip`;
-      downloadLink.style.display = 'none';
-      downloadLink.target = '_blank'; // Try to force download in a new tab
-      
-      // Add to document and click
-      document.body.appendChild(downloadLink);
-      downloadLink.click();
-      
-      // Remove the link after a short delay
-      setTimeout(() => {
-        if (document.body.contains(downloadLink)) {
-          document.body.removeChild(downloadLink);
-        }
-        
-        // Keep blob URL valid for a longer time to avoid "file not found" errors
-        setTimeout(() => {
-          URL.revokeObjectURL(blobUrl);
-          console.log("Revoked blob URL");
-        }, 60000); // 60 seconds
-      }, 1000);
-      
-      sendProgressUpdate(`Download complete! ${completedFiles} files included in ZIP.`);
-      
-      // Send success message
+    // Use the background script to download the ZIP (bypasses CORS)
+    const result = await new Promise((resolve) => {
       chrome.runtime.sendMessage({
-        action: "downloadComplete",
-        message: `Download started! ${completedFiles} files processed.`
-      }).catch(e => console.warn("Message sending error:", e));
-      
-      return {
-        success: true,
-        method: "direct_download",
-        totalFiles,
-        filesDownloaded: completedFiles,
-        filesFailed: failedFiles
-      };
-    } catch (directDownloadError) {
-      console.error("Direct download failed:", directDownloadError);
-      
-      // Fallback: try to download the blob using FileSaver.js
-      try {
-        console.log("Trying FileSaver.js for download");
-        if (typeof saveAs === 'function') {
-          saveAs(zipBlob, `${directoryName}.zip`);
-          sendProgressUpdate(`Download initiated! ${completedFiles} files included.`);
-          return {
-            success: true,
-            method: "filesaver",
-            filesDownloaded: completedFiles,
-            filesFailed: failedFiles
-          };
+        action: "downloadRepositoryZip",
+        url: repoZipUrl,
+        filename: `${repoInfo.repo}-${repoInfo.branch}.zip`,
+        timeoutMs: CONFIG.downloadTimeoutMs
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error("Error in background download:", chrome.runtime.lastError);
+          resolve({
+            success: false,
+            error: chrome.runtime.lastError.message
+          });
+        } else {
+          resolve(response);
         }
-      } catch (fileSaverError) {
-        console.error("FileSaver download failed:", fileSaverError);
-      }
-      
-      // Last resort: Store blob in the background page and use Chrome's download API
-      console.log("Falling back to Chrome download API");
-      
-      try {
-        const response = await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage({
-            action: "storeBlob",
-            blob: zipBlob,
-            filename: `${directoryName}.zip`
-          }, response => {
-            if (chrome.runtime.lastError) {
-              reject(chrome.runtime.lastError);
-            } else if (response && response.success) {
-              resolve(response);
-            } else {
-              reject(new Error(response?.error || "Failed to store blob"));
-            }
-          });
-        });
-        
-        if (!response || !response.blobId) {
-          throw new Error("Failed to store blob for download");
-        }
-        
-        // Use Chrome's downloads API
-        const downloadResponse = await new Promise((resolve, reject) => {
-          chrome.runtime.sendMessage({
-            action: "downloadDirectly",
-            blobId: response.blobId,
-            filename: `${directoryName}.zip`
-          }, response => {
-            if (chrome.runtime.lastError) {
-              reject(chrome.runtime.lastError);
-            } else if (response && response.success) {
-              resolve(response);
-            } else {
-              reject(new Error(response?.error || "Download failed"));
-            }
-          });
-        });
-        
-        sendProgressUpdate(`Download initiated via Chrome API! ${completedFiles} files included.`);
-        
-        return {
-          success: true,
-          method: "chrome_api",
-          totalFiles,
-          filesDownloaded: completedFiles,
-          filesFailed: failedFiles
-        };
-      } catch (apiError) {
-        console.error("Chrome downloads API failed:", apiError);
-        
-        // Final fallback: open the download page
-        try {
-          const response = await new Promise((resolve, reject) => {
-            chrome.runtime.sendMessage({
-              action: "storeBlob",
-              blob: zipBlob,
-              filename: `${directoryName}.zip`
-            }, response => {
-              if (chrome.runtime.lastError) {
-                reject(chrome.runtime.lastError);
-              } else if (response && response.success) {
-                resolve(response);
-              } else {
-                reject(new Error(response?.error || "Failed to store blob"));
-              }
-            });
-          });
-          
-          if (!response || !response.blobId) {
-            throw new Error("Failed to store blob for download");
-          }
-          
-          // Open the download page
-          chrome.runtime.sendMessage({
-            action: "openDownloadPage",
-            blobId: response.blobId,
-            filename: `${directoryName}.zip`,
-            fileSize: zipBlob.size,
-            autoStart: true
-          }, (response) => {
-            if (response && response.success) {
-              console.log("Download page opened successfully");
-            } else {
-              console.error("Failed to open download page:", response?.error);
-            }
-          });
-          
-          sendProgressUpdate(`Download page opened. Follow instructions there to complete the download.`);
-          
-          return {
-            success: true,
-            method: "download_page",
-            totalFiles,
-            filesDownloaded: completedFiles,
-            filesFailed: failedFiles
-          };
-        } catch (pageError) {
-          console.error("Error opening download page:", pageError);
-          throw new Error("All download methods failed");
-        }
-      }
+      });
+    });
+    
+    if (!result || !result.success) {
+      throw new Error(result?.error || "Failed to download repository ZIP");
     }
+    
+    console.log(`Repository ZIP downloaded via background script, size: ${formatFileSize(result.size)}`);
+    
+    // Get the blob from storage
+    const blobData = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({
+        action: "requestDownloadBlob",
+        blobId: result.blobId
+      }, (response) => {
+        if (chrome.runtime.lastError) {
+          console.error("Error retrieving blob:", chrome.runtime.lastError);
+          resolve(null);
+        } else if (!response || !response.success) {
+          console.error("Failed to retrieve blob:", response?.error);
+          resolve(null);
+        } else {
+          resolve(response);
+        }
+      });
+    });
+    
+    if (!blobData || !blobData.blob) {
+      throw new Error("Failed to retrieve repository ZIP data");
+    }
+    
+    // Check if the repository is too large
+    const repositorySizeMB = blobData.blob.size / (1024 * 1024);
+    if (repositorySizeMB > CONFIG.maxRepositorySizeMB) {
+      console.warn(`Repository size (${repositorySizeMB.toFixed(2)} MB) exceeds max size (${CONFIG.maxRepositorySizeMB} MB)`);
+      return {
+        success: false,
+        error: `Repository is too large (${repositorySizeMB.toFixed(2)} MB) for optimized download. Try the legacy method.`
+      };
+    }
+    
+    return {
+      success: true,
+      blob: blobData.blob,
+      filename: blobData.filename || `${repoInfo.repo}-${repoInfo.branch}.zip`,
+      size: blobData.blob.size
+    };
   } catch (error) {
-    console.error("Error in ZIP generation or download:", error);
-    
-    // Send error message
-    chrome.runtime.sendMessage({
-      action: "downloadError",
-      message: error.message || "Failed to download the ZIP file"
-    }).catch(e => console.warn("Failed to send error message:", e));
-    
-    throw error;
+    console.error("Error downloading repository ZIP:", error);
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 
-// Downloads files individually as a fallback method
-async function downloadFilesIndividually(repoInfo, path) {
+// Helper function to format file size
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+// Extract a specific subdirectory from the repository ZIP
+async function extractSubdirectoryFromZip(zipBlob, repoInfo, subdirectoryPath, progressCallback) {
   try {
-    sendProgressUpdate("Preparing individual file download...");
+    console.log(`Extracting subdirectory '${subdirectoryPath}' from repository ZIP`);
     
-    // Get directory contents using the API
-    const apiUrl = getApiUrl(repoInfo, path);
-    const response = await fetch(apiUrl);
+    // Default progress callback if not provided
+    const updateProgress = progressCallback || ((message) => console.log(message));
     
-    if (!response.ok) {
-      throw new Error(`GitHub API request failed (${response.status})`);
+    // Load the original ZIP in memory
+    let JSZipClass;
+    try {
+      JSZipClass = await loadJSZip();
+      console.log("JSZip loaded for extraction");
+    } catch (jsZipError) {
+      console.error("Failed to load JSZip for extraction:", jsZipError);
+      throw new Error("Could not load ZIP processing library: " + jsZipError.message);
     }
     
-    const items = await response.json();
-    console.log(`Found ${items.length} items to download individually`);
+    // Open the repository ZIP
+    console.log("Opening repository ZIP file");
+    updateProgress("Opening repository ZIP file...");
+    const originalZip = await JSZipClass.loadAsync(zipBlob);
     
-    // Process each item
-    for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      
-      if (item.type === 'file') {
-        sendProgressUpdate(`Downloading file ${i+1}/${items.length}: ${item.name}`);
-        
-        // Create a link for direct download
-        const link = document.createElement('a');
-        link.href = item.download_url;
-        link.download = item.name;
-        link.target = '_blank';
-        link.style.display = 'none';
-        
-        // Add to document and click
-        document.body.appendChild(link);
-        link.click();
-        
-        // Remove after a short delay
-        setTimeout(() => {
-          if (document.body.contains(link)) {
-            document.body.removeChild(link);
-          }
-        }, 500);
-        
-        // Add a small delay between downloads to avoid blocking
-        await new Promise(resolve => setTimeout(resolve, 500));
-      } else if (item.type === 'dir') {
-        // Offer to open directory for manual download
-        if (confirm(`Do you want to open the '${item.name}' directory to download its contents?`)) {
-          window.open(item.html_url, '_blank');
-        }
+    // Create a new ZIP for the subdirectory
+    const subdirectoryZip = new JSZipClass();
+    
+    // Find the repository folder name prefix in the ZIP
+    // GitHub ZIPs typically have a root folder named "repo-branch"
+    const zipFiles = Object.keys(originalZip.files);
+    if (zipFiles.length === 0) {
+      throw new Error("Repository ZIP is empty");
+    }
+    
+    // Get the repo-branch folder name from the first entry
+    const rootFolder = zipFiles[0].split('/')[0];
+    console.log("ZIP root folder:", rootFolder);
+    
+    // The full path to the subdirectory in the ZIP
+    const fullSubdirPath = subdirectoryPath ? `${rootFolder}/${subdirectoryPath}/` : rootFolder + '/';
+    console.log("Looking for subdirectory path in ZIP:", fullSubdirPath);
+    
+    // Count files in subdirectory to track progress
+    const filesToProcess = zipFiles.filter(path => 
+      path.startsWith(fullSubdirPath) && 
+      path !== fullSubdirPath &&
+      !originalZip.files[path].dir
+    );
+    
+    console.log(`Found ${filesToProcess.length} files in subdirectory to extract`);
+    updateProgress(`Found ${filesToProcess.length} files to extract`);
+    
+    // If no files found, the subdirectory might not exist or might be empty
+    if (filesToProcess.length === 0) {
+      // Check if the directory itself exists, even if it's empty
+      const dirExists = zipFiles.some(path => path === fullSubdirPath);
+      if (dirExists) {
+        console.log("Directory exists but is empty");
+        updateProgress("Directory is empty, creating empty ZIP file");
+        // Create an empty file to indicate it's not a mistake
+        subdirectoryZip.file("README.txt", "This directory was empty in the repository.");
+      } else {
+        throw new Error(`Subdirectory '${subdirectoryPath}' not found in repository ZIP`);
       }
     }
     
-    sendProgressUpdate(`Completed individual downloads for ${items.length} items`);
-    return { success: true, message: 'Individual downloads initiated' };
+    // Get subdirectory name for the new ZIP root
+    const subdirName = subdirectoryPath ? subdirectoryPath.split('/').pop() : repoInfo.repo;
+    let filesProcessed = 0;
+    
+    // Process each file in the subdirectory
+    for (const filePath of filesToProcess) {
+      try {
+        // Skip directories
+        if (originalZip.files[filePath].dir) continue;
+        
+        // Calculate the relative path from the subdirectory
+        // We want to maintain the proper folder structure but remove the repository root prefix
+        let relativePath;
+        
+        if (subdirectoryPath) {
+          // For specific subdirectory extraction, make that subdirectory the root
+          // Remove everything up to and including the subdirectory path
+          relativePath = filePath.substring(fullSubdirPath.length);
+        } else {
+          // For repository root, keep the relative structure but remove root folder prefix
+          relativePath = filePath.substring(rootFolder.length + 1);
+        }
+        
+        // Get the file content
+        const fileData = await originalZip.files[filePath].async('arraybuffer');
+        
+        // Add to the new ZIP
+        subdirectoryZip.file(relativePath, fileData);
+        
+        // Update progress
+        filesProcessed++;
+        if (filesProcessed % 10 === 0 || filesProcessed === filesToProcess.length) {
+          const progressMessage = `Extracted ${filesProcessed}/${filesToProcess.length} files`;
+          console.log(progressMessage);
+          updateProgress(progressMessage);
+        }
+      } catch (fileError) {
+        console.error(`Error extracting file ${filePath}:`, fileError);
+        // Continue with next file
+      }
+    }
+    
+    console.log(`Successfully extracted ${filesProcessed} files to new ZIP`);
+    updateProgress(`Creating ZIP file for ${subdirName}...`);
+    
+    // Generate the ZIP blob with compression
+    const zipBlob = await subdirectoryZip.generateAsync({
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: {
+        level: 5 // Medium compression level for balance of speed vs size
+      }
+    }, (metadata) => {
+      // Update progress during ZIP generation
+      if (metadata.percent % 10 === 0) {
+        const progressMessage = `Creating ZIP file: ${Math.round(metadata.percent)}% complete`;
+        updateProgress(progressMessage);
+      }
+    });
+    
+    console.log(`ZIP file generated successfully: ${formatFileSize(zipBlob.size)}`);
+    
+    return {
+      success: true,
+      zipBlob: zipBlob,
+      filename: `${subdirName}.zip`,
+      filesCount: filesProcessed,
+      size: zipBlob.size
+    };
   } catch (error) {
-    console.error("Error downloading files individually:", error);
-    return { success: false, message: error.message };
+    console.error("Error extracting subdirectory from ZIP:", error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+}
+
+// Generate the final ZIP file from the extracted subdirectory
+async function generateSubdirectoryZip(subdirZip, filename, updateStatus) {
+  try {
+    console.log(`Generating ZIP file: ${filename}`);
+    
+    // Generate the ZIP blob with options for good compression and browser compatibility
+    const zipBlob = await subdirZip.generateAsync({
+      type: "blob",
+      compression: "DEFLATE",
+      compressionOptions: {
+        level: 5 // Medium compression level for balance of speed vs size
+      }
+    }, (metadata) => {
+      // Update progress during ZIP generation
+      const percent = Math.round(metadata.percent);
+      updateStatus(`Creating ZIP file: ${percent}% complete...`);
+      console.log(`ZIP generation progress: ${percent}%`);
+    });
+    
+    console.log(`ZIP file generated successfully: ${formatFileSize(zipBlob.size)}`);
+    
+    return {
+      success: true,
+      blob: zipBlob,
+      filename: filename,
+      size: zipBlob.size
+    };
+  } catch (error) {
+    console.error("Error generating ZIP file:", error);
+    return {
+      success: false,
+      error: error.message
+    };
   }
 }
 
@@ -1377,36 +1430,136 @@ if (document.readyState === 'loading') {
 // Notify that the content script is loaded
 console.log("GitHub Repository Downloader content script loaded");
 
-// Function to open the download page with specified parameters
-function openDownloadPage(blobId, filename, fileSize) {
-  return new Promise((resolve, reject) => {
-    try {
-      // Construct the download page URL with parameters
-      const downloadUrl = chrome.runtime.getURL("html/download.html") + 
-        `?blobId=${encodeURIComponent(blobId)}` +
-        `&fileName=${encodeURIComponent(filename)}` +
-        `&fileSize=${encodeURIComponent(fileSize)}` +
-        `&autoStart=true`;
-      
-      console.log("Opening download page:", downloadUrl);
-      
-      // Open the download page in a new tab
-      chrome.runtime.sendMessage({
-        action: "openTab",
-        url: downloadUrl
-      }, (response) => {
-        if (chrome.runtime.lastError) {
-          console.error("Error opening download page:", chrome.runtime.lastError);
-          reject(chrome.runtime.lastError);
-        } else if (response && response.success) {
-          resolve(response);
-        } else {
-          reject(new Error("Failed to open download page"));
-        }
-      });
-    } catch (error) {
-      console.error("Error constructing download page URL:", error);
-      reject(error);
+// Process a directory concurrently, downloading all files with limited concurrency
+async function processDirectoryConcurrent(repoInfo, currentDirPath, zip, basePath, progressCallback, maxConcurrent = 10) {
+  console.log(`Processing directory: ${currentDirPath}`);
+  
+  try {
+    // Get directory contents from GitHub API
+    const apiUrl = getDirectoryApiUrl(repoInfo, currentDirPath);
+    const response = await fetch(apiUrl);
+    
+    if (!response.ok) {
+      console.error(`Failed to get directory contents: ${response.status} ${response.statusText}`);
+      throw new Error(`Failed to get directory contents: ${response.status}`);
     }
+    
+    const contents = await response.json();
+    console.log(`Found ${contents.length} items in ${currentDirPath || 'root'}`);
+    
+    // Count total files and directories
+    let totalFiles = 0;
+    let directories = [];
+    
+    for (const item of contents) {
+      if (item.type === 'file') {
+        totalFiles++;
+      } else if (item.type === 'dir') {
+        directories.push(item.path);
+      }
+    }
+    
+    // Prepare for concurrent downloads
+    const files = contents.filter(item => item.type === 'file');
+    const fileChunks = [];
+    const chunkSize = Math.min(maxConcurrent, files.length);
+    
+    // Create chunks for concurrent downloading
+    for (let i = 0; i < files.length; i += chunkSize) {
+      fileChunks.push(files.slice(i, i + chunkSize));
+    }
+    
+    console.log(`Downloading ${files.length} files in ${fileChunks.length} chunks of up to ${chunkSize} files`);
+    
+    // Track downloads
+    let completedFiles = 0;
+    let failedFiles = 0;
+    
+    // Process all file chunks
+    for (let i = 0; i < fileChunks.length; i++) {
+      const chunk = fileChunks[i];
+      console.log(`Processing chunk ${i+1}/${fileChunks.length} (${chunk.length} files)`);
+      
+      // Download files in current chunk concurrently
+      const chunkResults = await Promise.allSettled(chunk.map(async file => {
+        try {
+          // Calculate path for ZIP file relative to base path
+          let relativePath = file.path;
+          
+          // If we have a base path, remove it from the file path for proper ZIP structure
+          if (basePath && relativePath.startsWith(basePath)) {
+            relativePath = relativePath.substring(basePath.length).replace(/^\/+/, '');
+          }
+          
+          // Download the file content
+          const content = await downloadFile(repoInfo, file.path);
+          
+          // Add file to ZIP
+          zip.file(relativePath, content);
+          
+          completedFiles++;
+          if (progressCallback) {
+            progressCallback({
+              type: 'progress',
+              completed: completedFiles,
+              failed: failedFiles,
+              total: totalFiles,
+              currentOperation: `Downloaded ${file.path}`
+            });
+          }
+          
+          return { success: true, path: file.path };
+        } catch (error) {
+          console.error(`Failed to process file ${file.path}:`, error);
+          failedFiles++;
+          
+          if (progressCallback) {
+            progressCallback({
+              type: 'progress',
+              completed: completedFiles,
+              failed: failedFiles,
+              total: totalFiles,
+              currentOperation: `Failed: ${file.path} - ${error.message}`
+            });
+          }
+          
+          return { success: false, path: file.path, error: error.message };
+        }
+      }));
+      
+      // Log results for this chunk
+      const succeeded = chunkResults.filter(r => r.status === 'fulfilled' && r.value.success).length;
+      const failed = chunkResults.filter(r => r.status !== 'fulfilled' || !r.value.success).length;
+      console.log(`Chunk ${i+1} complete: ${succeeded} succeeded, ${failed} failed`);
+    }
+    
+    // Process subdirectories sequentially to avoid overwhelming the API
+    for (const dirPath of directories) {
+      // Recursive call for subdirectory
+      await processDirectoryConcurrent(
+        repoInfo,
+        dirPath,
+        zip,
+        basePath,
+        progressCallback,
+        maxConcurrent
+      );
+    }
+    
+    return { completedFiles, failedFiles, totalFiles };
+  } catch (error) {
+    console.error(`Error processing directory ${currentDirPath}:`, error);
+    throw error;
+  }
+}
+
+// Helper function to load external scripts
+function loadScript(url) {
+  return new Promise((resolve, reject) => {
+    const script = document.createElement('script');
+    script.src = url;
+    script.onload = resolve;
+    script.onerror = (e) => reject(new Error(`Failed to load script: ${url}`));
+    document.head.appendChild(script);
   });
 }
