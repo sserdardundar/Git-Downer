@@ -1,10 +1,12 @@
 {
-  "manifest_version": 2,
+  "manifest_version": 3,
   "name": "GitHub Repo Downloader",
   "description": "Download GitHub repositories or specific subdirectories as ZIP files with a single click.",
   "version": "1.0",
   "permissions": [
-    "activeTab", 
+    "activeTab"
+  ],
+  "host_permissions": [
     "https://github.com/*", 
     "https://api.github.com/*",
     "https://raw.githubusercontent.com/*"
@@ -16,11 +18,13 @@
     }
   ],
   "background": {
-    "scripts": ["background.js"],
-    "persistent": false
+    "service_worker": "background.js"
   },
-  "web_accessible_resources": ["jszip.min.js"],
-  "browser_action": {
+  "web_accessible_resources": [{
+    "resources": ["jszip.min.js"],
+    "matches": ["*://github.com/*"]
+  }],
+  "action": {
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon.png",

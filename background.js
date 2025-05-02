@@ -1,4 +1,4 @@
-// Background script for GitHub Repository Downloader
+// Background service worker for GitHub Repository Downloader
 
 // Listen for messages from content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -7,31 +7,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.action === "downloadComplete" || 
       message.action === "downloadError") {
     
-    // Get all windows
-    chrome.windows.getAll({ populate: true }, (windows) => {
-      // Loop through all windows and tabs
-      windows.forEach((window) => {
-        // Forward message to all tabs that have our extension popup open
-        window.tabs.forEach((tab) => {
-          chrome.tabs.sendMessage(tab.id, message, (response) => {
-            // Ignore error if no listener on that tab
-            if (chrome.runtime.lastError) {
-              // This is expected for tabs without our content script
-            }
+    // Forward message to all tabs with our extension's content script
+    chrome.tabs.query({}, (tabs) => {
+      tabs.forEach((tab) => {
+        // Only send to github.com tabs
+        if (tab.url && tab.url.includes('github.com')) {
+          chrome.tabs.sendMessage(tab.id, message).catch(() => {
+            // Ignore errors for tabs that don't have our content script
+            // This is normal and expected
           });
-        });
+        }
       });
     });
   }
   
-  // Always return true to indicate we'll send a response asynchronously
+  // Return true to indicate an asynchronous response
   return true;
 });
 
-// Log when the extension is installed
+// Listen for when the extension is installed or updated
 chrome.runtime.onInstalled.addListener((details) => {
   console.log("GitHub Repository Downloader installed:", details.reason);
+  
+  // Set up context menu if needed
+  // chrome.contextMenus.create({...}) could be added here
 });
 
-// Initialize the extension
-console.log("GitHub Repository Downloader background script loaded");
+// Listen for messages from the popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === "getStatus") {
+    // Could be used to get the current download status if implemented
+    sendResponse({ status: "idle" });
+  }
+});
+
+// Log that the service worker has started
+console.log("GitHub Repository Downloader service worker started");
