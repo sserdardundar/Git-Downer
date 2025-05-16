@@ -4,7 +4,8 @@ const CONFIG = {
   useOptimizedDownload: true,  // Set to false to force legacy download method
   debugMode: true,             // Enable detailed logging
   maxRepositorySizeMB: 200,    // Max repository size to use optimized method (in MB)
-  downloadTimeoutMs: 120000    // Timeout for repository download (120 seconds)
+  downloadTimeoutMs: 120000,    // Timeout for repository download (120 seconds)
+  showIconButtons: true        // Enable file/folder icon download buttons
 };
 
 let jsZip = null;
@@ -1417,6 +1418,7 @@ async function generateSubdirectoryZip(subdirZip, filename, updateStatus) {
 function setupMutationObserver() {
   // Add download button on initial page load
   addDownloadButtonToUI();
+  addFileDownloadButtons();
 
   // Create a mutation observer to watch for navigation changes
   const observer = new MutationObserver((mutations) => {
@@ -1435,6 +1437,22 @@ function setupMutationObserver() {
 
     if (navChanged) {
       addDownloadButtonToUI();
+    }
+    
+    // Check if file listing has changed
+    const fileListChanged = mutations.some(mutation => {
+      return mutation.target && 
+             (mutation.target.matches('[role="grid"]') || 
+              mutation.target.matches('.js-navigation-container') ||
+              mutation.target.classList.contains('js-navigation-container') ||
+              mutation.target.querySelector && 
+              (mutation.target.querySelector('[role="row"]') || 
+               mutation.target.querySelector('.js-navigation-item') ||
+               mutation.target.querySelector('.react-directory-row')));
+    });
+    
+    if (fileListChanged) {
+      setTimeout(addFileDownloadButtons, 100); // Slight delay to ensure DOM is updated
     }
   });
 
@@ -1583,5 +1601,201 @@ function loadScript(url) {
     script.onload = resolve;
     script.onerror = (e) => reject(new Error(`Failed to load script: ${url}`));
     document.head.appendChild(script);
+  });
+}
+
+// Function to add download buttons to individual file/folder icons
+function addFileDownloadButtons() {
+  // First check if the feature is enabled in user settings
+  chrome.storage.sync.get({ showIconButtons: true }, (settings) => {
+    // Exit if disabled in user settings
+    if (!settings.showIconButtons) {
+      console.log("File/folder icon download buttons disabled in settings");
+      return;
+    }
+    
+    // Exit if the feature is disabled in config
+    if (!CONFIG.showIconButtons) return;
+    
+    // Check if we're on a GitHub repository file listing page
+    if (!window.location.pathname.includes('tree') && !window.location.pathname.match(/^\/[^\/]+\/[^\/]+\/?$/)) {
+      return;
+    }
+    
+    console.log("Adding download buttons to file/folder icons");
+    
+    // Add CSS for the download buttons
+    const style = document.createElement('style');
+    style.textContent = `
+      .github-repo-item-download-btn {
+        display: none;
+        position: absolute;
+        right: 8px;
+        top: 50%;
+        transform: translateY(-50%);
+        background: var(--color-canvas-default, #0d1117);
+        border: 1px solid var(--color-border-default, #30363d);
+        border-radius: 3px;
+        color: var(--color-accent-fg, #58a6ff);
+        padding: 3px;
+        cursor: pointer;
+        z-index: 99;
+        width: 20px;
+        height: 20px;
+        line-height: 0;
+      }
+      
+      .github-repo-download-container:hover .github-repo-item-download-btn {
+        display: block;
+      }
+      
+      .github-repo-item-download-btn:hover {
+        background: var(--color-canvas-subtle, #161b22);
+      }
+    `;
+    document.head.appendChild(style);
+    
+    // Find all file and directory rows in the current view - use multiple selectors for different GitHub UI versions
+    const fileRows = document.querySelectorAll('.js-navigation-item, .react-directory-row, [role="row"]');
+    
+    if (!fileRows || fileRows.length === 0) {
+      console.log("No file rows found on this page");
+      return;
+    }
+    
+    console.log(`Found ${fileRows.length} file/directory items`);
+    
+    // Process each file/directory row
+    fileRows.forEach(row => {
+      // Skip if already has a download button
+      if (row.querySelector('.github-repo-item-download-btn')) {
+        return;
+      }
+      
+      // Find the link to determine the type and path
+      const fileLink = row.querySelector('a[href*="/blob/"], a[href*="/tree/"]');
+      if (!fileLink) return;
+      
+      // Determine if it's a file or directory
+      const isDirectory = fileLink.getAttribute('href').includes('/tree/');
+      
+      // Get the name of the file/directory
+      const nameElement = row.querySelector('.js-navigation-open, [role="rowheader"] a span');
+      const name = nameElement ? nameElement.textContent.trim() : fileLink.textContent.trim();
+      
+      // Add container class to row for hover effect
+      row.classList.add('github-repo-download-container');
+      
+      // Ensure row has relative positioning for absolute positioning of button
+      if (window.getComputedStyle(row).position === 'static') {
+        row.style.position = 'relative';
+      }
+      
+      // Create the download button
+      const downloadBtn = document.createElement('button');
+      downloadBtn.className = 'github-repo-item-download-btn';
+      downloadBtn.setAttribute('title', `Download ${isDirectory ? 'directory' : 'file'}: ${name}`);
+      
+      // Download icon
+      downloadBtn.innerHTML = `
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
+          <path d="M8 2c-.55 0-1 .45-1 1v5H2c-.55 0-1 .45-1 1 0 .25.1.5.29.7l6 6c.2.19.45.3.71.3.26 0 .51-.1.71-.29l6-6c.19-.2.29-.45.29-.7 0-.56-.45-1-1-1H9V3c0-.55-.45-1-1-1Z"></path>
+        </svg>
+      `;
+      
+      // Extract the file or directory path from the link
+      const href = fileLink.getAttribute('href');
+      const repoInfo = extractRepositoryInfo(window.location.href);
+      
+      // Click handler for download
+      downloadBtn.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        
+        if (!repoInfo) {
+          console.error("Failed to extract repository information");
+          return;
+        }
+        
+        console.log(`Download button clicked for ${isDirectory ? 'directory' : 'file'}: ${name}`);
+        
+        if (isDirectory) {
+          // For directories, set subdirectory path and download
+          const treeParts = href.split('/tree/');
+          if (treeParts.length > 1) {
+            const pathParts = treeParts[1].split('/');
+            const branch = pathParts[0]; // First part is the branch
+            const subdirPath = pathParts.slice(1).join('/'); // Rest is the path
+            
+            // Create a copy of repoInfo with the subdirectory path and branch
+            const dirInfo = { 
+              ...repoInfo,
+              branch: branch,
+              subdirectory: subdirPath 
+            };
+            
+            console.log(`Extracted repo info: owner=${dirInfo.owner}, repo=${dirInfo.repo}, branch=${dirInfo.branch}, subdirectory=${dirInfo.subdirectory}`);
+            
+            // Download the subdirectory
+            initializeStatusElement();
+            sendProgressUpdate(`Preparing to download directory: ${name}`);
+            downloadSubdirectory(dirInfo);
+          }
+        } else {
+          // For individual files, download directly
+          initializeStatusElement();
+          sendProgressUpdate(`Downloading file: ${name}`);
+          
+          try {
+            // Extract file path from href
+            const blobParts = href.split('/blob/');
+            if (blobParts.length > 1) {
+              const pathParts = blobParts[1].split('/');
+              const branch = pathParts[0]; // First part is the branch
+              const filePath = pathParts.slice(1).join('/'); // Rest is the path
+              
+              // Create a copy of repoInfo with the correct branch
+              const fileInfo = {
+                ...repoInfo,
+                branch: branch
+              };
+              
+              console.log(`Extracted file info: path=${filePath}, branch=${branch}`);
+              
+              // Download the individual file
+              const fileData = await downloadFile(fileInfo, filePath);
+              if (fileData) {
+                // Create a blob from the file data
+                const blob = new Blob([fileData], { type: 'application/octet-stream' });
+                
+                // Create a download link
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = name;
+                document.body.appendChild(a);
+                a.click();
+                
+                // Clean up
+                setTimeout(() => {
+                  document.body.removeChild(a);
+                  URL.revokeObjectURL(url);
+                }, 100);
+                
+                sendProgressUpdate(`Download complete: ${name}`, 100);
+              } else {
+                sendProgressUpdate(`Failed to download: ${name}`, 0);
+              }
+            }
+          } catch (error) {
+            console.error(`Error downloading file: ${error.message}`);
+            sendProgressUpdate(`Error downloading file: ${error.message}`, 0);
+          }
+        }
+      });
+      
+      // Add button to the row
+      row.appendChild(downloadBtn);
+    });
   });
 }
