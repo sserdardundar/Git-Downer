@@ -1754,9 +1754,16 @@ async function downloadSelectedItemsFromCheckboxes() {
       sendProgressUpdate(`Creating ZIP: ${Math.round(metadata.percent)}%`, 75 + (metadata.percent * 0.2));
     });
     
-    const fileName = selectedIds.length === 1 ? 
-      `${selectedIds[0]}.zip` : 
-      `selected_items_${Date.now()}.zip`;
+    // Generate filename based on selection and naming policy
+    let fileName;
+    if (selectedIds.length === 1) {
+      // Single file: use its name
+      fileName = `${selectedIds[0]}.zip`;
+    } else {
+      // Multiple files: use selected_ + repo name
+      const repoName = repoInfo.repo || 'repository';
+      fileName = `selected_${repoName}.zip`;
+    }
     
     await triggerDownload(zipBlob, fileName);
     
@@ -2487,8 +2494,8 @@ function injectStyles() {
   const s = document.createElement('style');
   s.id = 'ghx-style';
   s.textContent = `
-    .ghx-fixed-checkbox {
-      position: fixed !important;
+    .ghx-absolute-checkbox {
+      position: absolute !important;
       width: 16px !important;
       height: 16px !important;
       appearance: none !important;
@@ -2503,11 +2510,11 @@ function injectStyles() {
       margin: 0 !important;
       padding: 0 !important;
     }
-    .ghx-fixed-checkbox:checked {
+    .ghx-absolute-checkbox:checked {
       background: var(--color-accent-emphasis, #0969da) !important;
       border-color: var(--color-accent-emphasis, #0969da) !important;
     }
-    .ghx-fixed-checkbox:checked::after {
+    .ghx-absolute-checkbox:checked::after {
       content: '✓' !important;
       color: white !important;
       font-size: 11px !important;
@@ -2518,7 +2525,7 @@ function injectStyles() {
       transform: translate(-50%, -50%) !important;
       line-height: 1 !important;
     }
-    .ghx-fixed-checkbox:hover {
+    .ghx-absolute-checkbox:hover {
       border-color: var(--color-accent-emphasis, #0969da) !important;
       box-shadow: 0 0 0 2px var(--color-accent-subtle, #b6e3ff) !important;
     }
@@ -2575,12 +2582,12 @@ function injectCheckboxes() {
         return;
       }
       
-      console.log(`Injecting fixed checkbox for row ${index}: ${id}`);
+      console.log(`Injecting absolute checkbox for row ${index}: ${id}`);
       
-      // Create checkbox with fixed positioning
+      // Create checkbox with absolute positioning that scrolls with content
       const chk = document.createElement('input');
       chk.type = 'checkbox';
-      chk.className = 'ghx-fixed-checkbox';
+      chk.className = 'ghx-absolute-checkbox';
       chk.checked = selected.has(id);
       chk.tabIndex = 0;
       chk.setAttribute('aria-label', `Select ${id}`);
@@ -2589,10 +2596,10 @@ function injectCheckboxes() {
         onCheckboxChange(id, chk.checked, e);
       };
       
-      // Calculate and set position
+      // Calculate and set position relative to document
       updateCheckboxPosition(chk, row);
       
-      // Add to document body (not inside the table)
+      // Add to document body 
       document.body.appendChild(chk);
       checkboxElements.set(row, chk);
     });
@@ -2604,11 +2611,15 @@ function injectCheckboxes() {
 function updateCheckboxPosition(checkbox, row) {
   try {
     const rect = row.getBoundingClientRect();
+    const scrollX = window.pageXOffset || document.documentElement.scrollLeft;
+    const scrollY = window.pageYOffset || document.documentElement.scrollTop;
     
-    // For position: fixed, getBoundingClientRect() already gives viewport-relative coordinates
-    // No need to add scroll offsets
-    checkbox.style.left = (rect.left + 8) + 'px';
-    checkbox.style.top = (rect.top + (rect.height / 2) - 8) + 'px';
+    // Position absolutely relative to document, so it scrolls naturally with content
+    const x = rect.left + scrollX + 8;
+    const y = rect.top + scrollY + (rect.height / 2) - 8;
+    
+    checkbox.style.left = x + 'px';
+    checkbox.style.top = y + 'px';
   } catch (error) {
     console.error('Error updating checkbox position:', error);
   }
@@ -2673,32 +2684,44 @@ async function updateBulkBar(selected, total) {
   updateMainDownloadButtonText(checkedBoxes.length);
 }
 
+let originalButtonStyles = null; // Store user's original button styling
+let originalButtonContent = null; // Store user's original button content (icon + text)
+
 function updateMainDownloadButtonText(selectedCount) {
   if (!mainDownloadButton) return;
   
   const buttonElement = mainDownloadButton.querySelector('a') || mainDownloadButton.querySelector('button');
   if (!buttonElement) return;
   
-  const span = buttonElement.querySelector('span[data-content]') || buttonElement.querySelector('span');
+  // Store original styles and content on first call
+  if (!originalButtonStyles) {
+    originalButtonStyles = {
+      backgroundColor: buttonElement.style.backgroundColor || '',
+      borderColor: buttonElement.style.borderColor || '',
+      color: buttonElement.style.color || '',
+      borderRadius: buttonElement.style.borderRadius || '',
+      padding: buttonElement.style.padding || ''
+    };
+    // Store the complete original innerHTML (icon + text)
+    originalButtonContent = buttonElement.innerHTML;
+  }
   
   if (selectedCount === 0) {
-    if (span) {
-      span.textContent = 'Download Repository';
-    } else {
-      buttonElement.textContent = 'Download Repository';
-    }
-    buttonElement.style.backgroundColor = '#2ea44f';
+    // Restore user's original configured styling and content
+    buttonElement.innerHTML = originalButtonContent;
+    
+    // Restore all original styles
+    Object.assign(buttonElement.style, originalButtonStyles);
   } else {
+    // Selection mode - show count with simple text
     const text = selectedCount === 1 ? 
       `Download Selected (1 item)` : 
       `Download Selected (${selectedCount} items)`;
     
-    if (span) {
-      span.textContent = text;
-    } else {
-      buttonElement.textContent = text;
-    }
+    buttonElement.innerHTML = text;
     buttonElement.style.backgroundColor = '#0969da';
+    buttonElement.style.borderColor = '#0969da';
+    buttonElement.style.color = '#ffffff';
   }
 }
 
@@ -2788,78 +2811,34 @@ function observe() {
       checkboxElements.clear();
       reinit();
     } else {
-      // Update positions on DOM changes (but debounced)
+      // Update positions on DOM changes (debounced)
       clearTimeout(observe.positionTimeout);
-      observe.positionTimeout = setTimeout(updateAllCheckboxPositions, 25); // Faster DOM updates
+      observe.positionTimeout = setTimeout(updateAllCheckboxPositions, 100);
     }
   }).observe(document.body, { childList: true, subtree: true });
   
-  // High-frequency position updates using requestAnimationFrame
-  let isScrolling = false;
-  let isResizing = false;
-  let animationFrame = null;
-  
-  function schedulePositionUpdate() {
-    if (animationFrame) return; // Already scheduled
-    
-    animationFrame = requestAnimationFrame(() => {
-      updateAllCheckboxPositions();
-      animationFrame = null;
-      
-      // Continue updating while scrolling/resizing
-      if (isScrolling || isResizing) {
-        schedulePositionUpdate();
-      }
-    });
-  }
-  
-  // Scroll events - immediate response
-  let scrollTimeout;
-  window.addEventListener('scroll', () => {
-    isScrolling = true;
-    schedulePositionUpdate();
-    
-    // Mark scrolling as stopped after a short delay
-    clearTimeout(scrollTimeout);
-    scrollTimeout = setTimeout(() => {
-      isScrolling = false;
-    }, 50);
-  }, { passive: true });
-  
-  // Resize events - immediate response
+  // Only update on resize events (not scroll - checkboxes move naturally now)
   let resizeTimeout;
   window.addEventListener('resize', () => {
-    isResizing = true;
-    schedulePositionUpdate();
-    
-    // Mark resizing as stopped after a short delay
     clearTimeout(resizeTimeout);
-    resizeTimeout = setTimeout(() => {
-      isResizing = false;
-    }, 100);
+    resizeTimeout = setTimeout(updateAllCheckboxPositions, 50);
   }, { passive: true });
   
-  // Additional events that might affect positioning
+  // Handle orientation changes
   window.addEventListener('orientationchange', () => {
-    setTimeout(() => {
-      isResizing = true;
-      schedulePositionUpdate();
-      setTimeout(() => { isResizing = false; }, 200);
-    }, 100);
+    setTimeout(updateAllCheckboxPositions, 200);
   });
   
-  // Handle zoom changes
+  // Handle zoom changes (less frequent checking since no scroll updates needed)
   let lastInnerWidth = window.innerWidth;
   let lastInnerHeight = window.innerHeight;
   setInterval(() => {
     if (window.innerWidth !== lastInnerWidth || window.innerHeight !== lastInnerHeight) {
       lastInnerWidth = window.innerWidth;
       lastInnerHeight = window.innerHeight;
-      isResizing = true;
-      schedulePositionUpdate();
-      setTimeout(() => { isResizing = false; }, 100);
+      updateAllCheckboxPositions();
     }
-  }, 100); // Check for zoom/viewport changes every 100ms
+  }, 250); // Less frequent since we don't need scroll updates
   
   reinit();
 }
