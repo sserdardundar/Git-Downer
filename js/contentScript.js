@@ -2423,7 +2423,7 @@ function createSelectAllButton() {
   return selectAllButton;
 }
 
-// GitHub Checkbox Overlay Extension Content Script
+// GitHub Checkbox Overlay Extension Content Script - Fixed positioning approach
 
 const SELECTORS = [
   '[role="row"]', // Any GitHub row
@@ -2487,31 +2487,27 @@ function injectStyles() {
   const s = document.createElement('style');
   s.id = 'ghx-style';
   s.textContent = `
-    .ghx-checkbox-wrapper {
-      position: absolute !important;
-      left: 12px !important;
-      top: 50% !important;
-      transform: translateY(-50%) !important;
-      z-index: 1000 !important;
-      pointer-events: auto !important;
-    }
-    .ghx-row-checkbox {
+    .ghx-fixed-checkbox {
+      position: fixed !important;
+      width: 16px !important;
+      height: 16px !important;
       appearance: none !important;
       background-color: var(--bgColor-default, #fff) !important;
       border: 1.5px solid var(--borderColor-default, #d0d7de) !important;
       border-radius: 4px !important;
-      width: 16px !important; height: 16px !important;
       cursor: pointer !important;
       transition: all .15s ease !important;
-      z-index: 1001 !important;
+      z-index: 2147483647 !important;
       display: block !important;
-      position: relative !important;
+      pointer-events: auto !important;
+      margin: 0 !important;
+      padding: 0 !important;
     }
-    .ghx-row-checkbox:checked {
+    .ghx-fixed-checkbox:checked {
       background: var(--color-accent-emphasis, #0969da) !important;
       border-color: var(--color-accent-emphasis, #0969da) !important;
     }
-    .ghx-row-checkbox:checked::after {
+    .ghx-fixed-checkbox:checked::after {
       content: '✓' !important;
       color: white !important;
       font-size: 11px !important;
@@ -2520,14 +2516,11 @@ function injectStyles() {
       top: 50% !important;
       left: 50% !important;
       transform: translate(-50%, -50%) !important;
+      line-height: 1 !important;
     }
-    .ghx-row-checkbox:hover {
+    .ghx-fixed-checkbox:hover {
       border-color: var(--color-accent-emphasis, #0969da) !important;
       box-shadow: 0 0 0 2px var(--color-accent-subtle, #b6e3ff) !important;
-    }
-    .ghx-row-positioned {
-      position: relative !important;
-      padding-left: 40px !important;
     }
     #${BULK_BAR_ID} {
       position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
@@ -2549,36 +2542,45 @@ function injectStyles() {
   document.head.appendChild(s);
 }
 
+let checkboxElements = new Map(); // Track checkbox elements by row
+
 function injectCheckboxes() {
   const rows = getRows();
   console.log(`Found ${rows.length} rows to inject checkboxes into`);
   
+  // Remove checkboxes for rows that no longer exist
+  const currentRows = new Set(rows);
+  for (const [row, checkbox] of checkboxElements.entries()) {
+    if (!currentRows.has(row)) {
+      checkbox.remove();
+      checkboxElements.delete(row);
+    }
+  }
+  
   loadState().then(state => {
     const selected = new Set(Object.keys(state).filter(k => state[k]));
+    
     rows.forEach((row, index) => {
-      // Remove any existing checkbox wrapper
-      const oldWrapper = row.querySelector('.ghx-checkbox-wrapper');
-      if (oldWrapper) oldWrapper.remove();
-      
       let id = getId(row);
       if (!id) {
         console.log(`Skipping row ${index} - no ID`);
         return;
       }
       
-      console.log(`Injecting checkbox for row ${index}: ${id}`);
+      // If checkbox already exists for this row, just update its position and state
+      if (checkboxElements.has(row)) {
+        const checkbox = checkboxElements.get(row);
+        updateCheckboxPosition(checkbox, row);
+        checkbox.checked = selected.has(id);
+        return;
+      }
       
-      // Make row positioned so absolute positioning works
-      row.classList.add('ghx-row-positioned');
+      console.log(`Injecting fixed checkbox for row ${index}: ${id}`);
       
-      // Create wrapper for absolute positioning
-      const wrapper = document.createElement('span');
-      wrapper.className = 'ghx-checkbox-wrapper';
-      
-      // Create checkbox
+      // Create checkbox with fixed positioning
       const chk = document.createElement('input');
       chk.type = 'checkbox';
-      chk.className = 'ghx-row-checkbox';
+      chk.className = 'ghx-fixed-checkbox';
       chk.checked = selected.has(id);
       chk.tabIndex = 0;
       chk.setAttribute('aria-label', `Select ${id}`);
@@ -2587,14 +2589,35 @@ function injectCheckboxes() {
         onCheckboxChange(id, chk.checked, e);
       };
       
-      wrapper.appendChild(chk);
-      row.appendChild(wrapper);
+      // Calculate and set position
+      updateCheckboxPosition(chk, row);
       
-      // Visual highlight
-      row.classList.toggle('ghx-selected-row', selected.has(id));
+      // Add to document body (not inside the table)
+      document.body.appendChild(chk);
+      checkboxElements.set(row, chk);
     });
+    
     updateBulkBar(selected, rows.length);
   });
+}
+
+function updateCheckboxPosition(checkbox, row) {
+  try {
+    const rect = row.getBoundingClientRect();
+    
+    // For position: fixed, getBoundingClientRect() already gives viewport-relative coordinates
+    // No need to add scroll offsets
+    checkbox.style.left = (rect.left + 8) + 'px';
+    checkbox.style.top = (rect.top + (rect.height / 2) - 8) + 'px';
+  } catch (error) {
+    console.error('Error updating checkbox position:', error);
+  }
+}
+
+function updateAllCheckboxPositions() {
+  for (const [row, checkbox] of checkboxElements.entries()) {
+    updateCheckboxPosition(checkbox, row);
+  }
 }
 
 function getId(row) {
@@ -2626,11 +2649,11 @@ async function updateBulkBar(selected, total) {
   }
   
   // Check current state from actual checkboxes
-  const checkedBoxes = document.querySelectorAll('.ghx-row-checkbox:checked');
-  const totalBoxes = document.querySelectorAll('.ghx-row-checkbox');
-  const allSelected = checkedBoxes.length === totalBoxes.length && totalBoxes.length > 0;
+  const checkedBoxes = Array.from(checkboxElements.values()).filter(cb => cb.checked);
+  const totalBoxes = checkboxElements.size;
+  const allSelected = checkedBoxes.length === totalBoxes && totalBoxes > 0;
   
-  console.log(`UpdateBulkBar: ${checkedBoxes.length}/${totalBoxes.length} checkboxes checked, allSelected=${allSelected}`);
+  console.log(`UpdateBulkBar: ${checkedBoxes.length}/${totalBoxes} checkboxes checked, allSelected=${allSelected}`);
   
   const buttonText = allSelected ? 'Deselect All' : 'Select All';
   
@@ -2644,7 +2667,7 @@ async function updateBulkBar(selected, total) {
     toggleSelectAll(!allSelected);
   };
   
-  bar.style.display = totalBoxes.length > 0 ? 'flex' : 'none';
+  bar.style.display = totalBoxes > 0 ? 'flex' : 'none';
   
   // Update main download button text
   updateMainDownloadButtonText(checkedBoxes.length);
@@ -2698,12 +2721,12 @@ async function toggleSelectAll(selectAll) {
   updateAllRowStates(state);
   
   // Update bulk bar with actual checkbox counts
-  const checkedBoxes = document.querySelectorAll('.ghx-row-checkbox:checked');
-  const totalBoxes = document.querySelectorAll('.ghx-row-checkbox');
+  const checkedBoxes = Array.from(checkboxElements.values()).filter(cb => cb.checked);
+  const totalBoxes = checkboxElements.size;
   
-  console.log(`After toggle: ${checkedBoxes.length}/${totalBoxes.length} checkboxes selected`);
+  console.log(`After toggle: ${checkedBoxes.length}/${totalBoxes} checkboxes selected`);
   
-  updateBulkBar(new Set(), totalBoxes.length);
+  updateBulkBar(new Set(), totalBoxes);
 }
 
 async function onCheckboxChange(id, checked, e) {
@@ -2726,15 +2749,9 @@ async function onCheckboxChange(id, checked, e) {
   
   await saveState(state);
   
-  // Update UI immediately with actual checkbox counts
-  const checkedBoxes = document.querySelectorAll('.ghx-row-checkbox:checked');
-  const totalBoxes = document.querySelectorAll('.ghx-row-checkbox');
-  
-  console.log(`After checkbox change: ${checkedBoxes.length}/${totalBoxes.length} selected`);
-  
   // Update all visual states
   updateAllRowStates(state);
-  updateBulkBar(new Set(), totalBoxes.length);
+  updateBulkBar(new Set(), checkboxElements.size);
 }
 
 function updateAllRowStates(state) {
@@ -2743,23 +2760,107 @@ function updateAllRowStates(state) {
     const id = getId(row);
     const isSelected = state[id] || false;
     
-    // Update checkbox only - no row highlighting
-    const chk = row.querySelector('.ghx-row-checkbox');
-    if (chk) {
-      chk.checked = isSelected;
+    // Update checkbox state
+    const checkbox = checkboxElements.get(row);
+    if (checkbox) {
+      checkbox.checked = isSelected;
     }
   });
 }
 
 function observe() {
   let lastUrl = location.href;
-  const reinit = () => setTimeout(injectCheckboxes, 100);
+  const reinit = () => {
+    setTimeout(() => {
+      injectCheckboxes();
+      updateAllCheckboxPositions();
+    }, 100);
+  };
+  
+  // Watch for URL changes and DOM changes
   new MutationObserver(() => {
     if (location.href !== lastUrl) {
       lastUrl = location.href;
+      // Clear old checkboxes on URL change
+      for (const checkbox of checkboxElements.values()) {
+        checkbox.remove();
+      }
+      checkboxElements.clear();
       reinit();
+    } else {
+      // Update positions on DOM changes (but debounced)
+      clearTimeout(observe.positionTimeout);
+      observe.positionTimeout = setTimeout(updateAllCheckboxPositions, 25); // Faster DOM updates
     }
   }).observe(document.body, { childList: true, subtree: true });
+  
+  // High-frequency position updates using requestAnimationFrame
+  let isScrolling = false;
+  let isResizing = false;
+  let animationFrame = null;
+  
+  function schedulePositionUpdate() {
+    if (animationFrame) return; // Already scheduled
+    
+    animationFrame = requestAnimationFrame(() => {
+      updateAllCheckboxPositions();
+      animationFrame = null;
+      
+      // Continue updating while scrolling/resizing
+      if (isScrolling || isResizing) {
+        schedulePositionUpdate();
+      }
+    });
+  }
+  
+  // Scroll events - immediate response
+  let scrollTimeout;
+  window.addEventListener('scroll', () => {
+    isScrolling = true;
+    schedulePositionUpdate();
+    
+    // Mark scrolling as stopped after a short delay
+    clearTimeout(scrollTimeout);
+    scrollTimeout = setTimeout(() => {
+      isScrolling = false;
+    }, 50);
+  }, { passive: true });
+  
+  // Resize events - immediate response
+  let resizeTimeout;
+  window.addEventListener('resize', () => {
+    isResizing = true;
+    schedulePositionUpdate();
+    
+    // Mark resizing as stopped after a short delay
+    clearTimeout(resizeTimeout);
+    resizeTimeout = setTimeout(() => {
+      isResizing = false;
+    }, 100);
+  }, { passive: true });
+  
+  // Additional events that might affect positioning
+  window.addEventListener('orientationchange', () => {
+    setTimeout(() => {
+      isResizing = true;
+      schedulePositionUpdate();
+      setTimeout(() => { isResizing = false; }, 200);
+    }, 100);
+  });
+  
+  // Handle zoom changes
+  let lastInnerWidth = window.innerWidth;
+  let lastInnerHeight = window.innerHeight;
+  setInterval(() => {
+    if (window.innerWidth !== lastInnerWidth || window.innerHeight !== lastInnerHeight) {
+      lastInnerWidth = window.innerWidth;
+      lastInnerHeight = window.innerHeight;
+      isResizing = true;
+      schedulePositionUpdate();
+      setTimeout(() => { isResizing = false; }, 100);
+    }
+  }, 100); // Check for zoom/viewport changes every 100ms
+  
   reinit();
 }
 
