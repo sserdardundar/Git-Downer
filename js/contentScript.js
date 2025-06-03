@@ -2,10 +2,12 @@
 // Configuration options
 const CONFIG = {
   useOptimizedDownload: true,  // Set to false to force legacy download method
-  debugMode: true,             // Enable detailed logging
-  maxRepositorySizeMB: 200,    // Max repository size to use optimized method (in MB)
+  debugMode: false,             // Enable detailed logging
+  maxRepoSizeMB: 200,    // Max repository size to use optimized method (in MB)
   downloadTimeoutMs: 120000,    // Timeout for repository download (120 seconds)
-  showIconButtons: true        // Enable file/folder icon download buttons
+  showSelectionMode: true,      // Changed from showIconButtons
+  maxRetries: 3,
+  concurrentDownloads: 10
 };
 
 let jsZip = null;
@@ -13,6 +15,12 @@ let jsZipLoaded = false;
 
 // Global reference to the status element
 let statusElement = null;
+
+// Global selection state
+let selectedItems = new Map(); // Map of file/directory paths to item data
+// let selectionMode = false; // REMOVED: Checkboxes are always visible, selection state managed by selectedItems.size
+let selectAllButton = null;
+let mainDownloadButton = null;
 
 // Initialize the status element for progress updates
 function initializeStatusElement() {
@@ -117,64 +125,30 @@ function sendProgressUpdate(message, percentage = -1) {
   });
 }
 
-// Embed a minimal version of JSZip directly to avoid loading issues
-// This will act as a fallback if external loading fails
-const JSZipMinimal = `
-// Minimal JSZip implementation when full version fails to load
-class JSZipMinimal {
-  constructor() {
-    this.files = {};
-    this.root = '';
+// Utility functions
+const utils = {
+  sanitizeFilename(name) {
+    return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+|\.+$/g, '').slice(0, 255);
+  },
+  
+  formatBytes(bytes) {
+    if (!bytes) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    return `${(bytes / Math.pow(1024, i)).toFixed(1)} ${units[i]}`;
+  },
+  
+  delay(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  },
+  
+  createAbortController(timeoutMs = 20000) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+    controller.signal.addEventListener('abort', () => clearTimeout(timeoutId));
+    return controller;
   }
-
-  folder(name) {
-    return {
-      file: (filename, content) => {
-        // Store file in memory with folder path
-        const path = name ? name + '/' + filename : filename;
-        this.files[path] = content;
-        return true;
-      },
-      folder: (subName) => {
-        // Create nested folder
-        const fullPath = name ? name + '/' + subName : subName;
-        return {
-          file: (filename, content) => {
-            const path = fullPath + '/' + filename;
-            this.files[path] = content;
-            return true;
-          },
-          folder: () => null // Limited support for deep nesting
-        };
-      }
-    };
-  }
-
-  file(name, content) {
-    this.files[name] = content;
-    return true;
-  }
-
-  async generateAsync() {
-    // Since we can't create a zip, we'll create a single file with metadata
-    const fileList = Object.keys(this.files).map(name => ({
-      name,
-      size: this.files[name].byteLength || this.files[name].length || 0
-    }));
-    
-    const metadata = {
-      message: "JSZip wasn't able to load properly. Individual files will be downloaded separately.",
-      files: fileList
-    };
-    
-    // Just create a text file with the file listing
-    const textEncoder = new TextEncoder();
-    const metadataContent = textEncoder.encode(JSON.stringify(metadata, null, 2));
-    
-    return new Blob([metadataContent], { type: 'application/json' });
-  }
-}
-`;
+};
 
 // Load JSZip immediately when content script loads
 loadJSZip().then(() => {
@@ -284,7 +258,7 @@ function fallbackLoadJSZip(resolve, reject) {
   document.head.appendChild(scriptElement);
 }
 
-// Function to add download button to GitHub UI
+// Function to add main download button to GitHub UI
 function addDownloadButtonToUI() {
   // Check if we're on a GitHub repository page
   const pathParts = window.location.pathname.split('/');
@@ -451,19 +425,10 @@ function addDownloadButtonToUI() {
     const buttonElement = downloadButton.querySelector('a');
     buttonElement.addEventListener('click', (event) => {
       event.preventDefault();
-      console.log("Download button clicked");
-      
-      // Extract repository information from the current URL
-      const repoInfo = extractRepositoryInfo(window.location.href);
-      if (!repoInfo) {
-        console.error("Failed to extract repository information from URL");
-        alert("Unable to determine repository information from URL");
-        return;
-      }
-      
-      // Call downloadSubdirectory with the extracted repository information
-      downloadSubdirectory(repoInfo);
+      handleMainDownloadClick();
     });
+    
+    mainDownloadButton = downloadButton;
     
     console.log("Download button added to GitHub UI with custom styling");
   });
@@ -660,7 +625,7 @@ function tryDirectDownload(repoInfo) {
 }
 
 // Download a file from GitHub with retries
-async function downloadFile(repoInfo, filePath, maxRetries = 3) {
+async function downloadFile(repoInfo, filePath, maxRetries = CONFIG.maxRetries) {
   let retryCount = 0;
   let lastError = null;
   
@@ -982,53 +947,26 @@ async function handleSubdirectoryDownload(repoInfo) {
     try {
       console.log(`Creating download for ZIP file (${zipBlob.size} bytes)`);
       
-      // Try to create a direct download link
-      const url = URL.createObjectURL(zipBlob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = fileName;
-      a.style.display = 'none';
-      document.body.appendChild(a);
-      a.click();
+      // Directly trigger the download instead of opening a new page
+      await triggerDownload(zipBlob, fileName); // MODIFIED: Use direct download
       
-      // Clean up the URL object
-      setTimeout(() => {
-        document.body.removeChild(a);
-        URL.revokeObjectURL(url);
-      }, 100);
+      // No longer storing blob in background for this flow, as triggerDownload handles the blob directly.
+      // const blobId = await new Promise((resolve, reject) => { ... });
+      // await openDownloadPage(blobId, fileName, zipBlob.size);
       
       if (failedFiles > 0) {
-        sendProgressUpdate(`Download complete with ${failedFiles} missing files. Archive size: ${formatFileSize(zipBlob.size)}`);
+        sendProgressUpdate(`Download initiated with ${failedFiles} missing files. Archive size: ${utils.formatBytes(zipBlob.size)}`);
       } else {
-        sendProgressUpdate(`Download complete! Archive size: ${formatFileSize(zipBlob.size)}`);
+        sendProgressUpdate(`Download initiated! Archive size: ${utils.formatBytes(zipBlob.size)}`);
       }
     } catch (downloadError) {
       console.error("Error creating download link:", downloadError);
       
-      // Fall back to Chrome's download API
-      sendProgressUpdate("Using Chrome downloads API as fallback...");
-      
-      try {
-        const reader = new FileReader();
-        reader.onload = function() {
-          const dataUrl = reader.result;
-          chrome.runtime.sendMessage({
-            action: "downloadBlob",
-            dataUrl: dataUrl,
-            filename: fileName
-          }, response => {
-            if (response.success) {
-              sendProgressUpdate("Download initiated through Chrome API.");
-            } else {
-              sendProgressUpdate(`Error: ${response.error}`);
-            }
-          });
-        };
-        reader.readAsDataURL(zipBlob);
-      } catch (chromeError) {
-        console.error("Error using Chrome download API:", chromeError);
-        sendProgressUpdate(`Failed to download: ${chromeError.message}`);
-      }
+      // Fall back to direct download (this is now redundant as triggerDownload is the direct method)
+      // sendProgressUpdate("Using direct download as fallback...");
+      // try { ... old fallback ... } catch (fallbackError) { ... }
+      // The main triggerDownload already IS the direct download. If it fails, its catch block handles it.
+      sendProgressUpdate(`Failed to download: ${downloadError.message}`);
     }
   } catch (error) {
     console.error("Subdirectory download failed:", error);
@@ -1156,7 +1094,7 @@ async function downloadRepositoryZip(repoInfo) {
       chrome.runtime.sendMessage({
         action: "downloadRepositoryZip",
         url: repoZipUrl,
-        filename: `${repoInfo.repo}-${repoInfo.branch}.zip`,
+        filename: utils.sanitizeFilename(`${repoInfo.repo}-${repoInfo.branch}.zip`),
         timeoutMs: CONFIG.downloadTimeoutMs
       }, (response) => {
         if (chrome.runtime.lastError) {
@@ -1175,7 +1113,7 @@ async function downloadRepositoryZip(repoInfo) {
       throw new Error(result?.error || "Failed to download repository ZIP");
     }
     
-    console.log(`Repository ZIP downloaded via background script, size: ${formatFileSize(result.size)}`);
+    console.log(`Repository ZIP downloaded via background script, size: ${utils.formatBytes(result.size)}`);
     
     // Get the blob from storage
     const blobData = await new Promise((resolve) => {
@@ -1201,8 +1139,8 @@ async function downloadRepositoryZip(repoInfo) {
     
     // Check if the repository is too large
     const repositorySizeMB = blobData.blob.size / (1024 * 1024);
-    if (repositorySizeMB > CONFIG.maxRepositorySizeMB) {
-      console.warn(`Repository size (${repositorySizeMB.toFixed(2)} MB) exceeds max size (${CONFIG.maxRepositorySizeMB} MB)`);
+    if (repositorySizeMB > CONFIG.maxRepoSizeMB) {
+      console.warn(`Repository size (${repositorySizeMB.toFixed(2)} MB) exceeds max size (${CONFIG.maxRepoSizeMB} MB)`);
         return {
         success: false,
         error: `Repository is too large (${repositorySizeMB.toFixed(2)} MB) for optimized download. Try the legacy method.`
@@ -1247,7 +1185,6 @@ async function extractSubdirectoryFromZip(zipBlob, repoInfo, subdirectoryPath, p
     let JSZipClass;
     try {
       JSZipClass = await loadJSZip();
-      console.log("JSZip loaded for extraction");
     } catch (jsZipError) {
       console.error("Failed to load JSZip for extraction:", jsZipError);
       throw new Error("Could not load ZIP processing library: " + jsZipError.message);
@@ -1360,7 +1297,7 @@ async function extractSubdirectoryFromZip(zipBlob, repoInfo, subdirectoryPath, p
       }
     });
     
-    console.log(`ZIP file generated successfully: ${formatFileSize(zipBlob.size)}`);
+    console.log(`ZIP file generated successfully: ${utils.formatBytes(zipBlob.size)}`);
     
     return {
       success: true,
@@ -1397,7 +1334,7 @@ async function generateSubdirectoryZip(subdirZip, filename, updateStatus) {
       console.log(`ZIP generation progress: ${percent}%`);
     });
     
-    console.log(`ZIP file generated successfully: ${formatFileSize(zipBlob.size)}`);
+    console.log(`ZIP file generated successfully: ${utils.formatBytes(zipBlob.size)}`);
     
     return {
       success: true,
@@ -1414,50 +1351,64 @@ async function generateSubdirectoryZip(subdirZip, filename, updateStatus) {
   }
 }
 
-// Function to observe DOM changes and add the download button when navigation happens
+// Function to observe DOM changes and manage the interface
 function setupMutationObserver() {
-  // Add download button on initial page load
-  addDownloadButtonToUI();
-  addFileDownloadButtons();
+  console.log("[GRD] Setting up MutationObserver.");
+  // Initial attempt to add UI elements
+  setTimeout(() => {
+    console.log("[GRD] Initial UI setup timeout.");
+    addDownloadButtonToUI();
+    // REMOVED: addCheckboxesToFileRows(); - conflicts with overlay system
+  }, 750);
 
-  // Create a mutation observer to watch for navigation changes
-  const observer = new MutationObserver((mutations) => {
-    const navChanged = mutations.some(mutation => {
-      return Array.from(mutation.addedNodes).some(node => {
-        if (node.nodeType === Node.ELEMENT_NODE) {
-          return node.querySelector && (
-            node.querySelector('nav[aria-label="Repository"]') ||
-            node.querySelector('.UnderlineNav-body') ||
-            node.classList.contains('pagehead-actions')
-          );
+  const observer = new MutationObserver((mutationsList, observerInstance) => {
+    let relevantChange = false;
+    for (const mutation of mutationsList) {
+      if (mutation.type === 'childList' || mutation.type === 'subtree') {
+        const targets = [
+          '.js-details-container', '.js-navigation-container', 
+          'div[role="grid"]', '.react-directory-filename-column',
+          '.Box-row', 'table tbody'
+        ];
+        if (mutation.target && typeof mutation.target.matches === 'function' && targets.some(s => mutation.target.matches(s))) {
+          relevantChange = true;
+          break;
         }
-        return false;
-      });
-    });
-
-    if (navChanged) {
-      addDownloadButtonToUI();
+        if (mutation.addedNodes.length > 0) {
+           for (const node of mutation.addedNodes) {
+               if (node.nodeType === Node.ELEMENT_NODE && targets.some(s => node.matches && node.matches(s) || node.querySelector && node.querySelector(s))) {
+                   relevantChange = true;
+                   break;
+               }
+           }
+        }
+      }
+      if (relevantChange) break;
     }
-    
-    // Check if file listing has changed
-    const fileListChanged = mutations.some(mutation => {
-      return mutation.target && 
-             (mutation.target.matches('[role="grid"]') || 
-              mutation.target.matches('.js-navigation-container') ||
-              mutation.target.classList.contains('js-navigation-container') ||
-              mutation.target.querySelector && 
-              (mutation.target.querySelector('[role="row"]') || 
-               mutation.target.querySelector('.js-navigation-item') ||
-               mutation.target.querySelector('.react-directory-row')));
-    });
-    
-    if (fileListChanged) {
-      setTimeout(addFileDownloadButtons, 100); // Slight delay to ensure DOM is updated
+
+    if (relevantChange) {
+      console.log("[GRD] MutationObserver detected relevant DOM change. Re-applying UI elements.");
+      clearTimeout(observerInstance.timeoutId);
+      observerInstance.timeoutId = setTimeout(() => {
+        addDownloadButtonToUI();
+        // REMOVED: addCheckboxesToFileRows(); - conflicts with overlay system
+      }, 500);
     }
   });
 
-  // Start observing the document with the configured parameters
   observer.observe(document.body, { childList: true, subtree: true });
+  
+  // Periodic check as a fallback
+  setInterval(() => {
+    if (!document.getElementById('github-repo-downloader-btn')) {
+        const pathParts = window.location.pathname.split('/');
+        const isRepoPage = pathParts.length >= 3 && !['settings', 'search', 'marketplace', 'explore'].includes(pathParts[1]);
+        if (isRepoPage) {
+            console.log("[GRD] Periodic check: Adding missing main download button.");
+            addDownloadButtonToUI();
+        }
+    }
+  }, 7000);
 }
 
 // Initialize when the DOM is ready
@@ -1467,335 +1418,1351 @@ if (document.readyState === 'loading') {
   setupMutationObserver();
 }
 
-// Notify that the content script is loaded
-console.log("GitHub Repository Downloader content script loaded");
+console.log("GitHub Repository Downloader with checkbox selection system loaded");
 
 // Process a directory concurrently, downloading all files with limited concurrency
-async function processDirectoryConcurrent(repoInfo, currentDirPath, zip, basePath, progressCallback, maxConcurrent = 10) {
-  console.log(`Processing directory: ${currentDirPath}`);
+async function processDirectoryConcurrent(repoInfo, dirPath, zip, basePath, progressCallback, maxConcurrent = CONFIG.concurrentDownloads) {
+  console.log(`Processing directory: ${dirPath}`);
+  
+  const contents = await fetchDirectoryContents(repoInfo, dirPath);
+  if (!Array.isArray(contents)) {
+    throw new Error(`Invalid directory contents for ${dirPath}`);
+  }
+  
+  const files = contents.filter(item => item.type === 'file');
+  const dirs = contents.filter(item => item.type === 'dir');
+  
+  let completedFiles = 0;
+  let failedFiles = 0;
+  const totalFiles = files.length;
+  
+  // Process files in chunks
+  const fileChunks = [];
+  for (let i = 0; i < files.length; i += maxConcurrent) {
+    fileChunks.push(files.slice(i, i + maxConcurrent));
+  }
+  
+  for (let i = 0; i < fileChunks.length; i++) {
+    const chunk = fileChunks[i];
+    console.log(`Processing chunk ${i + 1}/${fileChunks.length} (${chunk.length} files)`);
+    
+    const results = await Promise.allSettled(chunk.map(async file => {
+      try {
+        let relativePath = file.path;
+        if (basePath && relativePath.startsWith(basePath)) {
+          relativePath = relativePath.substring(basePath.length).replace(/^\/+/, '');
+        }
+        
+        const content = await downloadFile(repoInfo, file.path);
+        zip.file(relativePath, content);
+        
+        completedFiles++;
+        progressCallback?.({
+          type: 'progress',
+          completed: completedFiles,
+          failed: failedFiles,
+          total: totalFiles,
+          currentOperation: `Downloaded ${file.name}`
+        });
+        
+        return { success: true, path: file.path };
+      } catch (error) {
+        console.error(`Failed to process file ${file.path}:`, error);
+        failedFiles++;
+        
+        progressCallback?.({
+          type: 'progress',
+          completed: completedFiles,
+          failed: failedFiles,
+          total: totalFiles,
+          currentOperation: `Failed: ${file.name} - ${error.message}`
+        });
+        
+        return { success: false, path: file.path, error: error.message };
+      }
+    }));
+    
+    // Log results
+    const successful = results.filter(r => r.value?.success).length;
+    const failed = results.length - successful;
+    console.log(`Chunk ${i + 1} complete: ${successful} successful, ${failed} failed`);
+  }
+  
+  // Process subdirectories recursively
+  for (const dir of dirs) {
+    await processDirectoryConcurrent(repoInfo, dir.path, zip, basePath, progressCallback, maxConcurrent);
+  }
+  
+  return { completedFiles, failedFiles, totalFiles };
+}
+
+async function fetchDirectoryContents(repoInfo, path = '') {
+  const apiUrl = getApiUrl(repoInfo, path);
+  const controller = utils.createAbortController();
   
   try {
-    // Get directory contents from GitHub API
-    const apiUrl = getDirectoryApiUrl(repoInfo, currentDirPath);
-    const response = await fetch(apiUrl);
-    
+    const response = await fetch(apiUrl, { signal: controller.signal });
     if (!response.ok) {
-      console.error(`Failed to get directory contents: ${response.status} ${response.statusText}`);
-      throw new Error(`Failed to get directory contents: ${response.status}`);
+      throw new Error(`API request failed: ${response.status}`);
     }
-    
-    const contents = await response.json();
-    console.log(`Found ${contents.length} items in ${currentDirPath || 'root'}`);
-    
-    // Count total files and directories
-    let totalFiles = 0;
-    let directories = [];
-    
-    for (const item of contents) {
-      if (item.type === 'file') {
-        totalFiles++;
-      } else if (item.type === 'dir') {
-        directories.push(item.path);
-      }
-    }
-    
-    // Prepare for concurrent downloads
-    const files = contents.filter(item => item.type === 'file');
-    const fileChunks = [];
-    const chunkSize = Math.min(maxConcurrent, files.length);
-    
-    // Create chunks for concurrent downloading
-    for (let i = 0; i < files.length; i += chunkSize) {
-      fileChunks.push(files.slice(i, i + chunkSize));
-    }
-    
-    console.log(`Downloading ${files.length} files in ${fileChunks.length} chunks of up to ${chunkSize} files`);
-    
-    // Track downloads
-    let completedFiles = 0;
-    let failedFiles = 0;
-    
-    // Process all file chunks
-    for (let i = 0; i < fileChunks.length; i++) {
-      const chunk = fileChunks[i];
-      console.log(`Processing chunk ${i+1}/${fileChunks.length} (${chunk.length} files)`);
-      
-      // Download files in current chunk concurrently
-      const chunkResults = await Promise.allSettled(chunk.map(async file => {
-        try {
-          // Calculate path for ZIP file relative to base path
-          let relativePath = file.path;
-          
-          // If we have a base path, remove it from the file path for proper ZIP structure
-          if (basePath && relativePath.startsWith(basePath)) {
-            relativePath = relativePath.substring(basePath.length).replace(/^\/+/, '');
-          }
-          
-          // Download the file content
-          const content = await downloadFile(repoInfo, file.path);
-          
-          // Add file to ZIP
-          zip.file(relativePath, content);
-          
-          completedFiles++;
-          if (progressCallback) {
-            progressCallback({
-              type: 'progress',
-              completed: completedFiles,
-              failed: failedFiles,
-              total: totalFiles,
-              currentOperation: `Downloaded ${file.path}`
-            });
-          }
-          
-          return { success: true, path: file.path };
-    } catch (error) {
-          console.error(`Failed to process file ${file.path}:`, error);
-          failedFiles++;
-          
-          if (progressCallback) {
-            progressCallback({
-              type: 'progress',
-              completed: completedFiles,
-              failed: failedFiles,
-              total: totalFiles,
-              currentOperation: `Failed: ${file.path} - ${error.message}`
-            });
-          }
-          
-          return { success: false, path: file.path, error: error.message };
-        }
-      }));
-      
-      // Log results for this chunk
-      const succeeded = chunkResults.filter(r => r.status === 'fulfilled' && r.value.success).length;
-      const failed = chunkResults.filter(r => r.status !== 'fulfilled' || !r.value.success).length;
-      console.log(`Chunk ${i+1} complete: ${succeeded} succeeded, ${failed} failed`);
-    }
-    
-    // Process subdirectories sequentially to avoid overwhelming the API
-    for (const dirPath of directories) {
-      // Recursive call for subdirectory
-      await processDirectoryConcurrent(
-        repoInfo,
-        dirPath,
-        zip,
-        basePath,
-        progressCallback,
-        maxConcurrent
-      );
-    }
-    
-    return { completedFiles, failedFiles, totalFiles };
+    return await response.json();
   } catch (error) {
-    console.error(`Error processing directory ${currentDirPath}:`, error);
+    console.error(`Failed to fetch directory contents for ${path}:`, error);
     throw error;
   }
 }
 
-// Helper function to load external scripts
-function loadScript(url) {
-  return new Promise((resolve, reject) => {
-    const script = document.createElement('script');
-    script.src = url;
-    script.onload = resolve;
-    script.onerror = (e) => reject(new Error(`Failed to load script: ${url}`));
-    document.head.appendChild(script);
-  });
+function getApiUrl(repoInfo, path = '') {
+  return `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${path}?ref=${repoInfo.branch}`;
 }
 
-// Function to add download buttons to individual file/folder icons
-function addFileDownloadButtons() {
-  // First check if the feature is enabled in user settings
-  chrome.storage.sync.get({ showIconButtons: true }, (settings) => {
-    // Exit if disabled in user settings
-    if (!settings.showIconButtons) {
-      console.log("File/folder icon download buttons disabled in settings");
-      return;
-    }
-    
-    // Exit if the feature is disabled in config
-    if (!CONFIG.showIconButtons) return;
-    
-    // Check if we're on a GitHub repository file listing page
-    if (!window.location.pathname.includes('tree') && !window.location.pathname.match(/^\/[^\/]+\/[^\/]+\/?$/)) {
-      return;
-    }
-    
-    console.log("Adding download buttons to file/folder icons");
-    
-    // Add CSS for the download buttons
-    const style = document.createElement('style');
-    style.textContent = `
-      .github-repo-item-download-btn {
-        display: none;
-        position: absolute;
-        right: 8px;
-        top: 50%;
-        transform: translateY(-50%);
-        background: var(--color-canvas-default, #0d1117);
-        border: 1px solid var(--color-border-default, #30363d);
-        border-radius: 3px;
-        color: var(--color-accent-fg, #58a6ff);
-        padding: 3px;
-        cursor: pointer;
-        z-index: 99;
-        width: 20px;
-        height: 20px;
-        line-height: 0;
-      }
-      
-      .github-repo-download-container:hover .github-repo-item-download-btn {
-        display: block;
-      }
-      
-      .github-repo-item-download-btn:hover {
-        background: var(--color-canvas-subtle, #161b22);
-      }
-    `;
-    document.head.appendChild(style);
-    
-    // Find all file and directory rows in the current view - use multiple selectors for different GitHub UI versions
-    const fileRows = document.querySelectorAll('.js-navigation-item, .react-directory-row, [role="row"]');
-    
-    if (!fileRows || fileRows.length === 0) {
-      console.log("No file rows found on this page");
-      return;
-    }
-    
-    console.log(`Found ${fileRows.length} file/directory items`);
-    
-    // Process each file/directory row
-    fileRows.forEach(row => {
-      // Skip if already has a download button
-      if (row.querySelector('.github-repo-item-download-btn')) {
+// Load JSZip library
+async function loadJSZip() {
+  if (jsZipLoaded && jsZip) return jsZip;
+  
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({
+      action: "executeScript",
+      scriptUrl: chrome.runtime.getURL('lib/jszip.min.js')
+    }, response => {
+      if (chrome.runtime.lastError) {
+        reject(new Error(chrome.runtime.lastError.message));
         return;
       }
       
-      // Find the link to determine the type and path
-      const fileLink = row.querySelector('a[href*="/blob/"], a[href*="/tree/"]');
-      if (!fileLink) return;
-      
-      // Determine if it's a file or directory
-      const isDirectory = fileLink.getAttribute('href').includes('/tree/');
-      
-      // Get the name of the file/directory
-      const nameElement = row.querySelector('.js-navigation-open, [role="rowheader"] a span');
-      const name = nameElement ? nameElement.textContent.trim() : fileLink.textContent.trim();
-      
-      // Add container class to row for hover effect
-      row.classList.add('github-repo-download-container');
-      
-      // Ensure row has relative positioning for absolute positioning of button
-      if (window.getComputedStyle(row).position === 'static') {
-        row.style.position = 'relative';
+      if (!response?.success) {
+        reject(new Error(response?.error || 'Failed to load JSZip'));
+        return;
       }
       
-      // Create the download button
-      const downloadBtn = document.createElement('button');
-      downloadBtn.className = 'github-repo-item-download-btn';
-      downloadBtn.setAttribute('title', `Download ${isDirectory ? 'directory' : 'file'}: ${name}`);
-      
-      // Download icon
-      downloadBtn.innerHTML = `
-        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
-          <path d="M8 2c-.55 0-1 .45-1 1v5H2c-.55 0-1 .45-1 1 0 .25.1.5.29.7l6 6c.2.19.45.3.71.3.26 0 .51-.1.71-.29l6-6c.19-.2.29-.45.29-.7 0-.56-.45-1-1-1H9V3c0-.55-.45-1-1-1Z"></path>
-        </svg>
-      `;
-      
-      // Extract the file or directory path from the link
-      const href = fileLink.getAttribute('href');
-      const repoInfo = extractRepositoryInfo(window.location.href);
-      
-      // Click handler for download
-      downloadBtn.addEventListener('click', async (event) => {
-        event.preventDefault();
-        event.stopPropagation();
-        
-        if (!repoInfo) {
-          console.error("Failed to extract repository information");
-          return;
-        }
-        
-        console.log(`Download button clicked for ${isDirectory ? 'directory' : 'file'}: ${name}`);
-        
-        if (isDirectory) {
-          // For directories, set subdirectory path and download
-          const treeParts = href.split('/tree/');
-          if (treeParts.length > 1) {
-            const pathParts = treeParts[1].split('/');
-            const branch = pathParts[0]; // First part is the branch
-            const subdirPath = pathParts.slice(1).join('/'); // Rest is the path
-            
-            // Create a copy of repoInfo with the subdirectory path and branch
-            const dirInfo = { 
-              ...repoInfo,
-              branch: branch,
-              subdirectory: subdirPath 
-            };
-            
-            console.log(`Extracted repo info: owner=${dirInfo.owner}, repo=${dirInfo.repo}, branch=${dirInfo.branch}, subdirectory=${dirInfo.subdirectory}`);
-            
-            // Download the subdirectory
-            initializeStatusElement();
-            sendProgressUpdate(`Preparing to download directory: ${name}`);
-            downloadSubdirectory(dirInfo);
-          }
-        } else {
-          // For individual files, download directly
-          initializeStatusElement();
-          sendProgressUpdate(`Downloading file: ${name}`);
-          
-          try {
-            // Extract file path from href
-            const blobParts = href.split('/blob/');
-            if (blobParts.length > 1) {
-              const pathParts = blobParts[1].split('/');
-              const branch = pathParts[0]; // First part is the branch
-              const filePath = pathParts.slice(1).join('/'); // Rest is the path
-              
-              // Create a copy of repoInfo with the correct branch
-              const fileInfo = {
-                ...repoInfo,
-                branch: branch
-              };
-              
-              console.log(`Extracted file info: path=${filePath}, branch=${branch}`);
-              
-              // Download the individual file
-              const fileData = await downloadFile(fileInfo, filePath);
-              if (fileData) {
-                // Create a blob from the file data
-                const blob = new Blob([fileData], { type: 'application/octet-stream' });
-                
-                // Create a download link
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = name;
-                document.body.appendChild(a);
-                a.click();
-                
-                // Clean up
-                setTimeout(() => {
-                  document.body.removeChild(a);
-                  URL.revokeObjectURL(url);
-                }, 100);
-                
-                sendProgressUpdate(`Download complete: ${name}`, 100);
-              } else {
-                sendProgressUpdate(`Failed to download: ${name}`, 0);
-              }
-            }
-          } catch (error) {
-            console.error(`Error downloading file: ${error.message}`);
-            sendProgressUpdate(`Error downloading file: ${error.message}`, 0);
-          }
-        }
-      });
-      
-      // Add button to the row
-      row.appendChild(downloadBtn);
+      // Check if JSZip is available
+      if (typeof JSZip !== 'undefined') {
+        jsZip = JSZip;
+        jsZipLoaded = true;
+        resolve(jsZip);
+      } else {
+        reject(new Error('JSZip not available after loading'));
+      }
     });
   });
 }
+
+// Function to add main download button to GitHub UI
+function addDownloadButtonToUI() {
+  const pathParts = window.location.pathname.split('/');
+  if (pathParts.length < 3) return;
+  
+  const isRepoPage = pathParts.length >= 3 && 
+                     !['settings', 'search', 'marketplace', 'explore'].includes(pathParts[1]);
+  
+  if (!isRepoPage) return;
+  
+  const navBar = document.querySelector('nav[aria-label="Repository"], .pagehead-actions, ul.UnderlineNav-body');
+  if (!navBar || document.getElementById('github-repo-downloader-btn')) return;
+  
+  const defaultSettings = {
+    buttonColor: '#2ea44f',
+    buttonText: 'Download Repository',
+    buttonStyle: 'default'
+  };
+  
+  const downloadButton = document.createElement('li');
+  downloadButton.className = 'UnderlineNav-item d-flex';
+  downloadButton.id = 'github-repo-downloader-btn';
+  downloadButton.style.marginLeft = '8px';
+  
+  chrome.storage.sync.get(defaultSettings, (settings) => {
+    const isTreeView = window.location.pathname.includes('/tree/');
+    const buttonText = isTreeView ? 
+      settings.buttonText.replace('Repository', 'Directory') : 
+      settings.buttonText;
+    
+    if (navBar.classList.contains('UnderlineNav-body')) {
+      downloadButton.innerHTML = `
+        <a class="UnderlineNav-item" role="tab" data-view-component="true">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16" fill="currentColor" style="margin-right: 4px;">
+            <path d="M8 2c-.55 0-1 .45-1 1v5H2c-.55 0-1 .45-1 1 0 .25.1.5.29.7l6 6c.2.19.45.3.71.3.26 0 .51-.1.71-.29l6-6c.19-.2.29-.45.29-.7 0-.56-.45-1-1-1H9V3c0-.55-.45-1-1-1Z"></path>
+          </svg>
+          <span data-content="${buttonText}">${buttonText}</span>
+        </a>
+      `;
+      
+      const navLink = downloadButton.querySelector('a');
+      navLink.style.fontWeight = '600';
+      navLink.style.color = settings.buttonColor;
+      
+      navBar.appendChild(downloadButton);
+    } else {
+      downloadButton.innerHTML = `
+        <a class="btn btn-sm btn-primary">
+          <svg aria-hidden="true" height="16" viewBox="0 0 16 16" version="1.1" width="16">
+            <path d="M8 2c-.55 0-1 .45-1 1v5H2c-.55 0-1 .45-1 1 0 .25.1.5.29.7l6 6c.2.19.45.3.71.3.26 0 .51-.1.71-.29l6-6c.19-.2.29-.45.29-.7 0-.56-.45-1-1-1H9V3c0-.55-.45-1-1-1Z"></path>
+          </svg>
+          ${buttonText}
+        </a>
+      `;
+      
+      const btnElement = downloadButton.querySelector('a');
+      btnElement.style.backgroundColor = settings.buttonColor;
+      btnElement.style.borderColor = settings.buttonColor;
+      btnElement.style.color = '#ffffff';
+      
+      if (navBar.classList.contains('pagehead-actions')) {
+        navBar.insertBefore(downloadButton, navBar.firstChild);
+      } else {
+        navBar.appendChild(downloadButton);
+      }
+    }
+    
+    mainDownloadButton = downloadButton;
+    
+    const buttonElement = downloadButton.querySelector('a');
+    buttonElement.addEventListener('click', (event) => {
+      event.preventDefault();
+      handleMainDownloadClick();
+    });
+    
+    console.log("Download button added to GitHub UI");
+  });
+}
+
+function handleMainDownloadClick() {
+  // Check if we have selected items in the new checkbox system
+  loadState().then(state => {
+    const selectedIds = Object.keys(state).filter(k => state[k]);
+    const selectedCount = selectedIds.length;
+    
+    console.log(`Main download clicked: ${selectedCount} items selected`);
+    
+    if (selectedCount === 0) {
+      // Download entire repository
+      const repoInfo = extractRepositoryInfo(window.location.href);
+      if (repoInfo) {
+        console.log("Downloading entire repository");
+        downloadRepository(repoInfo);
+      }
+    } else {
+      // Download selected items
+      console.log("Downloading selected items:", selectedIds);
+      downloadSelectedItemsFromCheckboxes();
+    }
+  });
+}
+
+async function downloadSelectedItemsFromCheckboxes() {
+  const state = await loadState();
+  const selectedIds = Object.keys(state).filter(k => state[k]);
+  
+  if (selectedIds.length === 0) return;
+  
+  console.log(`Downloading ${selectedIds.length} selected items`);
+  initializeStatusElement();
+  sendProgressUpdate(`Preparing to download ${selectedIds.length} selected items...`);
+  
+  try {
+    let JSZipClass;
+    try {
+      JSZipClass = await loadJSZip();
+    } catch (error) {
+      throw new Error("Failed to load ZIP library: " + error.message);
+    }
+    
+    const zip = new JSZipClass();
+    const repoInfo = extractRepositoryInfo(window.location.href);
+    
+    let completedItems = 0;
+    let failedItems = 0;
+    const totalItems = selectedIds.length;
+    
+    // Get all rows to find the corresponding file info for each selected ID
+    const rows = getRows();
+    
+    for (const selectedId of selectedIds) {
+      try {
+        // Find the row with this ID
+        const row = rows.find(r => getId(r) === selectedId);
+        if (!row) {
+          console.warn(`Could not find row for selected ID: ${selectedId}`);
+          failedItems++;
+          continue;
+        }
+        
+        const link = row.querySelector('a[href*="/blob/"], a[href*="/tree/"]');
+        if (!link) {
+          console.warn(`Could not find link for selected ID: ${selectedId}`);
+          failedItems++;
+          continue;
+        }
+        
+        const href = link.getAttribute('href') || link.href;
+        const isDirectory = href.includes('/tree/');
+        
+        sendProgressUpdate(`Processing ${selectedId} (${completedItems + 1}/${totalItems})...`, 
+                         Math.round((completedItems / totalItems) * 50));
+        
+        if (isDirectory) {
+          // Extract directory path from URL
+          const urlParts = href.split('/tree/');
+          if (urlParts.length > 1) {
+            const pathParts = urlParts[1].split('/');
+            const branch = pathParts[0];
+            const dirPath = pathParts.slice(1).join('/');
+            
+            const dirRepoInfo = { ...repoInfo, branch };
+            
+            // Download directory recursively
+            await processDirectoryConcurrent(
+              dirRepoInfo,
+              dirPath,
+              zip,
+              dirPath,
+              (progress) => {
+                if (progress?.type === 'progress') {
+                  sendProgressUpdate(`Processing ${selectedId}: ${progress.completed || 0} files downloaded`);
+                }
+              }
+            );
+          }
+        } else {
+          // Download individual file
+          const urlParts = href.split('/blob/');
+          if (urlParts.length > 1) {
+            const pathParts = urlParts[1].split('/');
+            const branch = pathParts[0];
+            const filePath = pathParts.slice(1).join('/');
+            
+            const fileRepoInfo = { ...repoInfo, branch };
+            const fileData = await downloadFile(fileRepoInfo, filePath);
+            zip.file(selectedId, fileData);
+          }
+        }
+        
+        completedItems++;
+      } catch (error) {
+        console.error(`Failed to download ${selectedId}:`, error);
+        failedItems++;
+      }
+    }
+    
+    sendProgressUpdate("Creating ZIP file...", 75);
+    
+    const zipBlob = await zip.generateAsync({
+      type: 'blob',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    }, (metadata) => {
+      sendProgressUpdate(`Creating ZIP: ${Math.round(metadata.percent)}%`, 75 + (metadata.percent * 0.2));
+    });
+    
+    const fileName = selectedIds.length === 1 ? 
+      `${selectedIds[0]}.zip` : 
+      `selected_items_${Date.now()}.zip`;
+    
+    await triggerDownload(zipBlob, fileName);
+    
+    const message = failedItems > 0 ? 
+      `Download completed with ${failedItems} failed items` : 
+      "Download completed successfully!";
+    
+    sendProgressUpdate(message, 100);
+    
+  } catch (error) {
+    console.error("Download failed:", error);
+    sendProgressUpdate(`Download failed: ${error.message}`);
+  }
+}
+
+async function triggerDownload(zipBlob, fileName) {
+  try {
+    // Fallback to direct download (now primary method)
+    console.log(`Triggering direct download for ${fileName}, size: ${utils.formatBytes(zipBlob.size)}`);
+    const url = URL.createObjectURL(zipBlob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = utils.sanitizeFilename(fileName); // Ensure filename is sanitized
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    
+    setTimeout(() => {
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      console.log(`Direct download initiated for ${fileName}`);
+      sendProgressUpdate(`Download initiated for ${fileName}! Check downloads.`, 100);
+    }, 100);
+
+  } catch (error) {
+    console.error("Error triggering direct download:", error);
+    sendProgressUpdate(`Error: Could not initiate download - ${error.message}`);
+    // Optionally, re-throw or handle further if direct download itself fails
+    // For example, try to use background script as a last resort if direct fails critically
+  }
+}
+
+function downloadRepository(repoInfo) {
+  console.log("Downloading full repository:", repoInfo);
+  initializeStatusElement();
+  sendProgressUpdate("Downloading full repository...");
+  
+  if (repoInfo.subdirectory && repoInfo.subdirectory.trim() !== '') {
+    // Download subdirectory
+    handleSubdirectoryDownload(repoInfo);
+  } else {
+    // Download full repository
+    const archiveUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}/archive/refs/heads/${repoInfo.branch}.zip`;
+    
+    // Try to use the background script for downloading to avoid CORS issues
+    chrome.runtime.sendMessage({
+      action: "downloadRepositoryZip",
+      url: archiveUrl,
+      filename: `${repoInfo.repo}-${repoInfo.branch}.zip`
+    }, (response) => {
+      if (response?.success && response.blobId) { // Ensure blobId is present
+        sendProgressUpdate("Repository ZIP fetched by background script. Preparing download...");
+        
+        // Get the blob from background script
+        chrome.runtime.sendMessage({
+          action: "requestDownloadBlob", // This action needs to retrieve the actual Blob object
+          blobId: response.blobId
+        }, (blobResponse) => {
+          if (blobResponse?.success && blobResponse.blob instanceof Blob) {
+            console.log("Blob retrieved from background, triggering direct download.");
+            triggerDirectDownload(blobResponse.blob, response.filename); // Use a new function for clarity
+            sendProgressUpdate("Repository download initiated!", 100);
+          } else {
+            console.error("Failed to retrieve blob from background or blob is invalid:", blobResponse?.error);
+            sendProgressUpdate(`Error: Failed to retrieve repository ZIP data from background. ${blobResponse?.error || ''}`);
+            // Fallback to trying to download the archiveUrl directly if background retrieval fails
+            console.log("Falling back to direct link download for repository ZIP.");
+            triggerDirectDownloadFromUrl(archiveUrl, `${repoInfo.repo}-${repoInfo.branch}.zip`);
+          }
+        });
+      } else {
+        console.error("Background downloadRepositoryZip failed or no blobId:", response?.error);
+        sendProgressUpdate(`Error: Background download failed. ${response?.error || 'Attempting direct link.'}`);
+        // Fallback to direct download using the URL
+        triggerDirectDownloadFromUrl(archiveUrl, `${repoInfo.repo}-${repoInfo.branch}.zip`);
+      }
+    });
+  }
+}
+
+// Renamed the old triggerDirectDownload to avoid confusion with the new primary triggerDownload(blob, filename)
+function triggerDirectDownloadFromUrl(url, filename) {
+  sendProgressUpdate("Using direct URL download as fallback...");
+  console.log(`Attempting to download directly from URL: ${url}`);
+  
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = utils.sanitizeFilename(filename);
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  try {
+    a.click();
+    sendProgressUpdate(`Direct URL download for ${filename} initiated! Check downloads.`, 100);
+  } catch (e) {
+    sendProgressUpdate(`Direct URL download for ${filename} failed. ${e.message}`, 0);
+    console.error("Error clicking download link: ", e);
+  }
+  
+  setTimeout(() => {
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
+  }, 100);
+}
+
+// New function to handle blobs from background script
+function triggerDirectDownload(blob, filename) { // Note: This function name was already used, ensure it's the one for Blob
+  if (!(blob instanceof Blob)) {
+    console.error("triggerDirectDownload received invalid blob:", blob);
+    sendProgressUpdate("Error: Invalid data for download.", 0);
+    return;
+  }
+  sendProgressUpdate(`Preparing direct download for ${filename}...`);
+  console.log(`Triggering direct download for blob: ${filename}, size: ${utils.formatBytes(blob.size)}`);
+  
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = utils.sanitizeFilename(filename);
+  a.style.display = 'none';
+  document.body.appendChild(a);
+  try {
+    a.click();
+    sendProgressUpdate(`Download for ${filename} initiated! Check downloads.`, 100);
+  } catch (e) {
+    sendProgressUpdate(`Download for ${filename} failed. ${e.message}`, 0);
+    console.error("Error clicking download link: ", e);
+  }
+  
+  setTimeout(() => {
+    if (a.parentNode) {
+      a.parentNode.removeChild(a);
+    }
+    URL.revokeObjectURL(url);
+  }, 100);
+}
+
+// Selection management functions
+function toggleSelectionMode() {
+  // For backwards compatibility, but checkboxes are always visible now
+  console.log("Selection mode toggled (checkboxes are always visible)");
+}
+
+function clearAllSelections() {
+  selectedItems.clear();
+  document.querySelectorAll('.file-checkbox').forEach(checkbox => {
+    checkbox.checked = false;
+  });
+  updateMainDownloadButton();
+  updateSelectAllButton();
+}
+
+function selectAllItems() {
+  const fileRows = getFileRows();
+  
+  fileRows.forEach(row => {
+    const checkbox = row.querySelector('.file-checkbox');
+    const itemData = getRowItemData(row);
+    
+    if (checkbox && itemData) {
+      checkbox.checked = true;
+      selectedItems.set(itemData.path, itemData);
+    }
+  });
+  
+  updateMainDownloadButton();
+  updateSelectAllButton();
+}
+
+function unselectAllItems() {
+  clearAllSelections();
+}
+
+function toggleItemSelection(itemData, checked) {
+  if (checked) {
+    console.log(`[GRD] Selecting: ${itemData.path}`);
+    selectedItems.set(itemData.path, itemData);
+  } else {
+    console.log(`[GRD] Deselecting: ${itemData.path}`);
+    selectedItems.delete(itemData.path);
+  }
+  updateMainDownloadButton();
+  updateSelectAllButtonState(); // Renamed
+}
+
+function updateMainDownloadButton() {
+  if (!mainDownloadButton) return;
+  
+  const buttonElement = mainDownloadButton.querySelector('a') || mainDownloadButton.querySelector('button');
+  if (!buttonElement) return;
+  
+  const selectedCount = selectedItems.size;
+  const span = buttonElement.querySelector('span[data-content]') || buttonElement.querySelector('span');
+  
+  if (selectedCount === 0) {
+    if (span) {
+      span.textContent = 'Download Repository';
+    } else {
+      buttonElement.textContent = 'Download Repository';
+    }
+    buttonElement.style.backgroundColor = '#2ea44f';
+  } else {
+    const text = selectedCount === 1 ? 
+      `Download Selected (1 item)` : 
+      `Download Selected (${selectedCount} items)`;
+    
+    if (span) {
+      span.textContent = text;
+    } else {
+      buttonElement.textContent = text;
+    }
+    buttonElement.style.backgroundColor = '#0969da';
+  }
+}
+
+function updateSelectAllButton() {
+  if (!selectAllButton) return;
+  
+  const fileRows = getFileRows();
+  const checkboxes = document.querySelectorAll('.file-checkbox');
+  const checkedBoxes = document.querySelectorAll('.file-checkbox:checked');
+  
+  // Show/hide the select all button based on whether any checkboxes are checked
+  const anyChecked = checkedBoxes.length > 0;
+  selectAllButton.style.display = anyChecked ? 'inline-block' : 'none';
+  
+  if (checkedBoxes.length === 0) {
+    selectAllButton.textContent = 'Select All';
+  } else if (checkedBoxes.length === checkboxes.length && checkboxes.length > 0) {
+    selectAllButton.textContent = 'Unselect All';
+  } else {
+    selectAllButton.textContent = `Select All (${checkedBoxes.length}/${checkboxes.length})`;
+  }
+}
+
+function updateSelectionUI() {
+  // This function is now mainly for ensuring the select all button state is correct
+  // as checkboxes are always visible.
+  console.log("[GRD] updateSelectionUI called (primarily updates select all button).");
+  updateSelectAllButtonState();
+}
+
+// File row detection and data extraction
+function getFileRows() {
+  console.log("[GRD] getFileRows called.");
+  const selectors = [
+    '.js-details-container[data-hpc] > .Box > [role="row"]', // Modern UI (e.g. code view file list)
+    '.js-details-container > .Box > [role="row"]', // A slightly more general version
+    '.js-navigation-container .js-navigation-item[role="row"]', // Older UI file lists
+    'div[role="grid"] div[role="rowgroup"] div[role="row"]', // Generic grid structure
+    '.react-directory-row', // React-based directory view
+    '.Box-row[role="row"]' // Common Box row pattern used for file listings
+  ];
+  
+  let fileRows = [];
+  for (const selector of selectors) {
+    const elements = Array.from(document.querySelectorAll(selector));
+    if (elements.length > 0) {
+      console.log(`[GRD] Found ${elements.length} potential rows with selector: ${selector}`);
+      fileRows = elements.filter(row => {
+        const isHeaderRow = row.matches('[role="columnheader"], .react-directory-header-row') || row.querySelector('[role="columnheader"]');
+        const hasFileLink = row.querySelector('a[href*="/blob/"], a[href*="/tree/"], [data-testid="fs-entry-icon"] + a');
+        const isSubmoduleEntry = row.querySelector('.octicon-file-submodule');
+
+        if (isHeaderRow) return false;
+        if (isSubmoduleEntry) { // Often don't want to select submodules this way
+            // console.log("[GRD] Filtering out submodule row:", row);
+            return false; 
+        }
+        return hasFileLink !== null;
+      });
+      if (fileRows.length > 0) {
+        console.log(`[GRD] Filtered to ${fileRows.length} actual file rows using: ${selector}`);
+        break; 
+      }
+    }
+  }
+  
+  if (fileRows.length === 0) {
+    console.warn("[GRD] No file rows found with any primary selector. This might be an unsupported page structure or empty directory.");
+  }
+  return fileRows;
+}
+
+function getRowItemData(row) {
+  const link = row.querySelector('a[href*="/blob/"], a[href*="/tree/"]');
+  if (!link) return null;
+  
+  let href = link.href || link.getAttribute('href');
+  if (!href) return null;
+  
+  if (!href.startsWith('http')) {
+    href = new URL(href, window.location.origin).href;
+  }
+  
+  const isDirectory = href.includes('/tree/');
+  const name = link.textContent.trim();
+  const repoInfo = extractRepositoryInfo(window.location.href);
+  
+  if (!repoInfo) return null;
+  
+  let branch = repoInfo.branch;
+  let path = '';
+  
+  try {
+    if (isDirectory) {
+      const treeParts = href.split('/tree/');
+      if (treeParts.length > 1) {
+        const pathWithBranch = treeParts[1];
+        const parts = pathWithBranch.split('/');
+        branch = parts[0];
+        path = parts.slice(1).join('/');
+      }
+    } else {
+      const blobParts = href.split('/blob/');
+      if (blobParts.length > 1) {
+        const pathWithBranch = blobParts[1];
+        const parts = pathWithBranch.split('/');
+        branch = parts[0];
+        path = parts.slice(1).join('/');
+      }
+    }
+  } catch (error) {
+    console.error("Error parsing URL:", error);
+    return null;
+  }
+  
+  return {
+    name,
+    path,
+    href,
+    isDirectory,
+    type: isDirectory ? 'directory' : 'file',
+    repoInfo: { ...repoInfo, branch },
+    fullPath: path
+  };
+}
+
+// Create and manage selection interface
+function addCheckboxesToFileRows() {
+  console.log("[GRD] Attempting to add/update checkboxes...");
+  if (!window.location.hostname.includes('github.com')) {
+    console.log("[GRD] Not a GitHub domain. Skipping checkboxes.");
+    return;
+  }
+
+  const repoInfo = extractRepositoryInfo(window.location.href);
+  if (!repoInfo) {
+    console.log("[GRD] No repo info found. Skipping checkboxes.");
+    return;
+  }
+
+  // Check if we are on a page that should have file listings
+  // (e.g., /tree/main, or the root of a repo)
+  const path = window.location.pathname;
+  const isFileListingPage = path.includes('/tree/') || /^\/[^\/]+\/[^\/]+\/?(?:$|\/(?:tree\/[^\/]+)?)$/.test(path);
+
+  if (!isFileListingPage) {
+    console.log("[GRD] Not a file listing page. Path:", path, "Skipping checkboxes.");
+    // Clear any existing checkboxes if we navigate away from a file listing page
+    document.querySelectorAll('.file-checkbox, .github-select-all-btn').forEach(el => el.remove());
+    if (selectAllButton) selectAllButton.style.display = 'none';
+    return;
+  }
+  console.log("[GRD] On a file listing page. Proceeding with checkboxes.");
+
+  addCheckboxStyles(); // Ensure styles are present
+
+  const fileRows = getFileRows();
+  if (fileRows.length === 0) {
+    console.log("[GRD] No file rows found by getFileRows. Checkbox addition aborted for now.");
+    return;
+  }
+  console.log(`[GRD] Found ${fileRows.length} file rows. Adding checkboxes...`);
+
+  // Create select all button if it doesn't exist
+  if (!selectAllButton || !document.body.contains(selectAllButton)) {
+    selectAllButton = createSelectAllButton(); // createSelectAllButton handles appending
+  }
+
+  fileRows.forEach((row, index) => {
+    // Skip if checkbox already exists on this specific row
+    if (row.querySelector('.file-checkbox')) {
+      // console.log(`[GRD] Checkbox already exists for row ${index}.`);
+      return;
+    }
+
+    const itemData = getRowItemData(row);
+    if (!itemData) {
+      console.warn(`[GRD] Could not get item data for row ${index}:`, row);
+      return;
+    }
+
+    const checkbox = document.createElement('input');
+    checkbox.type = 'checkbox';
+    checkbox.className = 'file-checkbox';
+    checkbox.dataset.path = itemData.path;
+    checkbox.dataset.name = itemData.name;
+    checkbox.dataset.type = itemData.isDirectory ? 'directory' : 'file'; // Use isDirectory
+    checkbox.checked = selectedItems.has(itemData.path); // Sync with current selection state
+
+    // Style the checkbox (some styles in CSS, some here for dynamic parts)
+    Object.assign(checkbox.style, {
+      // position: 'absolute', // Let CSS handle this if possible for better flow
+      // left: '8px',
+      // top: '50%',
+      // transform: 'translateY(-50%)',
+      // zIndex: '20', // Let CSS handle
+      // width: '16px', // In CSS
+      // height: '16px', // In CSS
+      cursor: 'pointer',
+      display: 'inline-block', // Make sure it's visible
+      verticalAlign: 'middle',
+      marginRight: '8px', // Space between checkbox and icon/text
+      opacity: checkbox.checked ? '1' : '0.6' // Initial opacity
+    });
+    
+    checkbox.addEventListener('mouseenter', () => { checkbox.style.opacity = '1'; });
+    checkbox.addEventListener('mouseleave', () => { checkbox.style.opacity = checkbox.checked ? '1' : '0.6'; });
+
+    checkbox.addEventListener('change', (e) => {
+      e.stopPropagation(); // Prevent row click if any
+      checkbox.style.opacity = checkbox.checked ? '1' : '0.6';
+      toggleItemSelection(itemData, checkbox.checked);
+      updateSelectAllButtonState(); // Renamed for clarity
+    });
+    
+    // Injection Point:
+    // Try to find the cell with the file icon or name.
+    // GitHub structure: usually a div with class 'react-directory-filename-column', or similar.
+    // Or the first 'td' or '[role="gridcell"]'
+    let injectionTarget = row.querySelector('td:first-of-type, [role="gridcell"]:first-of-type, .react-directory-filename-column');
+    
+    if (injectionTarget) {
+        // Prepend checkbox to keep it to the left of the icon/text
+        injectionTarget.style.position = 'relative'; // Ensure z-index works if needed
+        // Check if a link or main content element exists to prepend before
+        const firstLinkOrIcon = injectionTarget.querySelector('svg, a, .react-file-icon__root');
+        if (firstLinkOrIcon) {
+            firstLinkOrIcon.parentNode.insertBefore(checkbox, firstLinkOrIcon);
+        } else {
+            injectionTarget.prepend(checkbox);
+        }
+        // console.log(`[GRD] Added checkbox to ${itemData.name} in target:`, injectionTarget);
+    } else {
+      // Fallback: prepend to the row itself if no better target found
+      row.prepend(checkbox);
+      console.warn(`[GRD] Used fallback injection for checkbox in row ${index}:`, row);
+    }
+  });
+
+  updateMainDownloadButton();
+  updateSelectAllButtonState(); // Renamed for clarity
+  console.log(`[GRD] Finished adding/updating checkboxes. Total on page: ${document.querySelectorAll('.file-checkbox').length}`);
+}
+
+function addCheckboxStyles() {
+  const styleId = 'github-repo-downloader-checkbox-styles';
+  if (document.getElementById(styleId)) return;
+
+  const style = document.createElement('style');
+  style.id = styleId;
+  style.textContent = `
+    .file-checkbox {
+      appearance: none;
+      background-color: #fff;
+      border: 1px solid #d0d7de; /* Standard GitHub border color */
+      border-radius: 3px;
+      width: 16px;
+      height: 16px;
+      position: relative; /* For pseudo-elements like checkmark */
+      cursor: pointer;
+      transition: all 0.15s ease;
+      vertical-align: middle; /* Align with text/icons */
+      margin-right: 8px; /* Space from icon/name */
+      flex-shrink: 0; /* Prevent shrinking in flex containers */
+    }
+    .file-checkbox:checked {
+      background-color: #0969da; /* GitHub blue */
+      border-color: #0969da;
+      opacity: 1 !important;
+    }
+    .file-checkbox:checked::before {
+      content: '✓';
+      color: white;
+      font-size: 12px;
+      font-weight: bold;
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      line-height: 1;
+    }
+    .file-checkbox:hover {
+      border-color: #0969da;
+      opacity: 1 !important;
+      /* transform: scale(1.1); */ /* Can cause layout shifts, be careful */
+    }
+    .github-select-all-btn {
+      transition: all 0.2s ease;
+    }
+    .github-select-all-btn:hover {
+      background-color: #f3f4f6 !important;
+      /* transform: translateY(-1px); */ /* Can cause layout shifts */
+    }
+    
+    /* Adjustments for common GitHub file row structures */
+    /* Ensure cells that will contain checkboxes can do so cleanly */
+    [role="row"] > [role="gridcell"]:first-of-type, 
+    .Box-row > td:first-of-type,
+    .react-directory-row > .react-directory-filename-column {
+        display: flex; /* Helps align checkbox with icon/text */
+        align-items: center;
+        /* padding-left: 0 !important; */ /* Reset padding if needed, checkbox adds margin */
+    }
+
+    /* Remove excessive padding if checkbox is directly in these containers */
+    /* This might be too aggressive, test carefully */
+    /*
+    .react-directory-filename a,
+    .js-navigation-open,
+    [role="gridcell"]:first-child a {
+      padding-left: 0px !important; 
+    }
+    */
+  `;
+  document.head.appendChild(style);
+  console.log("[GRD] Checkbox styles added.");
+}
+
+// ... existing code ...
+function toggleItemSelection(itemData, checked) {
+  if (checked) {
+    console.log(`[GRD] Selecting: ${itemData.path}`);
+    selectedItems.set(itemData.path, itemData);
+  } else {
+    console.log(`[GRD] Deselecting: ${itemData.path}`);
+    selectedItems.delete(itemData.path);
+  }
+  updateMainDownloadButton();
+  updateSelectAllButtonState(); // Renamed
+}
+
+// ... existing code ...
+function updateSelectAllButtonState() { // Renamed from updateSelectAllButton
+  if (!selectAllButton || !document.body.contains(selectAllButton)) {
+    console.log("[GRD] updateSelectAllButtonState: No selectAllButton found or not in DOM.");
+    return;
+  }
+  
+  const checkboxes = document.querySelectorAll('.file-checkbox');
+  const checkedBoxes = document.querySelectorAll('.file-checkbox:checked');
+  
+  const totalCheckboxesOnPage = checkboxes.length;
+  const totalChecked = checkedBoxes.length;
+
+  if (totalCheckboxesOnPage === 0) {
+    selectAllButton.style.display = 'none'; // Hide if no checkboxes on page
+    console.log("[GRD] No checkboxes on page, hiding selectAllButton.");
+    return;
+  }
+
+  // Show "Select All" button if there are items to select,
+  // and make it more prominent if some items are already selected.
+  selectAllButton.style.display = 'inline-block';
+  
+  if (totalChecked === 0) {
+    selectAllButton.textContent = 'Select All';
+  } else if (totalChecked === totalCheckboxesOnPage) {
+    selectAllButton.textContent = 'Unselect All';
+  } else {
+    selectAllButton.textContent = `Selected (${totalChecked}/${totalCheckboxesOnPage})`;
+  }
+  console.log(`[GRD] Select All Button state updated: ${selectAllButton.textContent}`);
+}
+
+// ... existing code ...
+function createSelectAllButton() {
+  // Remove existing if any to prevent duplicates
+  const existingBtn = document.querySelector('.github-select-all-btn');
+  if (existingBtn) existingBtn.remove();
+  selectAllButton = null; // Reset global variable
+
+  console.log("[GRD] Creating Select All button.");
+  
+  const headerSelectors = [
+    // Modern GitHub UI (2023+)
+    '.gh-header-actions', // Top right actions group
+    '[data-testid="sticky-header"] .Box-header', // Header within sticky header
+    '.repository-content .Box-header:first-of-type', // First Box-header in main content
+    '.file-navigation .d-flex.justify-content-between', // File navigation bar actions area
+    '.file-navigation', // Fallback within file navigation
+    // Older UI / More general
+    '.pagehead-actions', // Common for older UI actions
+    '.Box-header', // General Box-header
+    '[aria-label="Repository actions"]' // Actions group by aria-label
+  ];
+
+  let fileHeader = null;
+  for (const selector of headerSelectors) {
+    fileHeader = document.querySelector(selector);
+    if (fileHeader) {
+      console.log(`[GRD] Found file header for Select All button using selector: ${selector}`);
+      break;
+    }
+  }
+  
+  if (!fileHeader) {
+    // Last resort fallback: try to find *any* prominent header or action bar
+    fileHeader = document.querySelector('.pagehead, header[role="banner"], #repository-container-header');
+    if (fileHeader) {
+        console.warn(`[GRD] Used fallback header selector for Select All button:`, fileHeader);
+    } else {
+        console.error("[GRD] CRITICAL: Could not find ANY suitable file header for Select All button. It will not appear.");
+        return null;
+    }
+  }
+  
+  selectAllButton = document.createElement('button');
+  selectAllButton.textContent = 'Select All';
+  selectAllButton.className = 'btn btn-sm github-select-all-btn';
+  Object.assign(selectAllButton.style, {
+    marginLeft: '12px',
+    marginRight: '12px',
+    cursor: 'pointer',
+    display: 'none' // Initially hidden, shown by updateSelectAllButtonState
+  });
+  
+  selectAllButton.addEventListener('click', (e) => {
+    e.preventDefault();
+    const allCheckboxes = document.querySelectorAll('.file-checkbox');
+    const checkedCheckboxes = document.querySelectorAll('.file-checkbox:checked');
+    
+    if (checkedCheckboxes.length === allCheckboxes.length && allCheckboxes.length > 0) {
+      console.log("[GRD] Unselecting all items via Select All button.");
+      unselectAllItems();
+    } else {
+      console.log("[GRD] Selecting all items via Select All button.");
+      selectAllItems();
+    }
+  });
+  
+  // Append to the found header. If it has other buttons, try to insert it logically.
+  const existingButtons = fileHeader.querySelectorAll('.btn, .Button');
+  if (existingButtons.length > 0 && existingButtons[0].parentNode === fileHeader) {
+    // Insert before the first button if possible to group it with other actions
+    fileHeader.insertBefore(selectAllButton, existingButtons[0]);
+    console.log("[GRD] Select All button inserted before first existing button in header.");
+  } else {
+    fileHeader.appendChild(selectAllButton);
+    console.log("[GRD] Select All button appended to header.");
+  }
+  
+  return selectAllButton;
+}
+
+// GitHub Checkbox Overlay Extension Content Script
+
+const SELECTORS = [
+  '[role="row"]', // Any GitHub row
+  '.js-navigation-item', // Legacy repo navigation  
+  '.Box-row', // Box rows
+  '.react-directory-row', // React directory rows
+  'tr', // Table rows
+];
+const OVERLAY_CLASS = 'ghx-chk-ovl';
+const BULK_BAR_ID = 'ghx-bulk-bar';
+const STORAGE_KEY = () => 'ghx_' + location.pathname.replace(/[^a-zA-Z0-9_/-]/g, '_');
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => Array.from(root.querySelectorAll(sel));
+
+function getRows() {
+  return SELECTORS.flatMap(sel => $$(sel)).filter(row => {
+    // Must be visible
+    if (!row.offsetParent) return false;
+    
+    // Exclude header rows - comprehensive check
+    const isHeader = row.querySelector('[role="columnheader"]') || 
+                    row.matches('[role="columnheader"]') ||
+                    row.classList.contains('react-directory-header-row') ||
+                    row.classList.contains('Box-header') ||
+                    row.querySelector('th') ||
+                    row.matches('th') ||
+                    row.querySelector('.sr-only') ||
+                    (row.textContent && row.textContent.trim().toLowerCase().includes('name')) && 
+                    !row.querySelector('a[href*="/blob/"], a[href*="/tree/"]') ||
+                    row.getAttribute('aria-label')?.toLowerCase().includes('header') ||
+                    row.classList.contains('file-header') ||
+                    row.classList.contains('js-details-target');
+    
+    if (isHeader) return false;
+    
+    // Must have a file or folder link OR be in a file listing area
+    const hasFileLink = row.querySelector('a[href*="/blob/"], a[href*="/tree/"]');
+    const inFileArea = row.closest('.js-details-container, .repository-content');
+    
+    if (!hasFileLink && !inFileArea) return false;
+    
+    // If has file link, exclude ".." directory
+    if (hasFileLink) {
+      const linkText = hasFileLink.textContent.trim();
+      if (linkText === '..' || linkText === '...' || linkText.includes('parent directory')) return false;
+    }
+    
+    // Additional check: if row contains only text without links, likely a header
+    if (!hasFileLink && row.textContent.trim().length < 100 && 
+        (row.textContent.includes('Name') || row.textContent.includes('Size') || row.textContent.includes('Last commit'))) {
+      return false;
+    }
+    
+    return true;
+  });
+}
+
+function injectStyles() {
+  if ($('#ghx-style')) return;
+  const s = document.createElement('style');
+  s.id = 'ghx-style';
+  s.textContent = `
+    .ghx-checkbox-wrapper {
+      position: absolute !important;
+      left: 12px !important;
+      top: 50% !important;
+      transform: translateY(-50%) !important;
+      z-index: 1000 !important;
+      pointer-events: auto !important;
+    }
+    .ghx-row-checkbox {
+      appearance: none !important;
+      background-color: var(--bgColor-default, #fff) !important;
+      border: 1.5px solid var(--borderColor-default, #d0d7de) !important;
+      border-radius: 4px !important;
+      width: 16px !important; height: 16px !important;
+      cursor: pointer !important;
+      transition: all .15s ease !important;
+      z-index: 1001 !important;
+      display: block !important;
+      position: relative !important;
+    }
+    .ghx-row-checkbox:checked {
+      background: var(--color-accent-emphasis, #0969da) !important;
+      border-color: var(--color-accent-emphasis, #0969da) !important;
+    }
+    .ghx-row-checkbox:checked::after {
+      content: '✓' !important;
+      color: white !important;
+      font-size: 11px !important;
+      font-weight: bold !important;
+      position: absolute !important;
+      top: 50% !important;
+      left: 50% !important;
+      transform: translate(-50%, -50%) !important;
+    }
+    .ghx-row-checkbox:hover {
+      border-color: var(--color-accent-emphasis, #0969da) !important;
+      box-shadow: 0 0 0 2px var(--color-accent-subtle, #b6e3ff) !important;
+    }
+    .ghx-row-positioned {
+      position: relative !important;
+      padding-left: 40px !important;
+    }
+    #${BULK_BAR_ID} {
+      position:fixed;bottom:24px;left:50%;transform:translateX(-50%);
+      background:var(--color-canvas-default, #fff);color:var(--color-fg-default, #222);
+      border:1px solid var(--color-border-default, #d0d7de);border-radius:12px;
+      box-shadow:var(--color-shadow-large, 0 8px 24px rgba(0,0,0,0.12));
+      padding:12px 24px;z-index:2147483647;display:flex;align-items:center;gap:16px;
+      font-size:14px;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    }
+    #${BULK_BAR_ID} button {
+      background:var(--color-btn-primary-bg, #1f883d);color:var(--color-btn-primary-text, #fff);
+      border:1px solid var(--color-btn-primary-border, transparent);border-radius:6px;
+      padding:6px 16px;cursor:pointer;font-weight:500;transition:all .2s;font-size:14px;
+    }
+    #${BULK_BAR_ID} button:hover { 
+      background:var(--color-btn-primary-hover-bg, #1a7f37); 
+    }
+  `;
+  document.head.appendChild(s);
+}
+
+function injectCheckboxes() {
+  const rows = getRows();
+  console.log(`Found ${rows.length} rows to inject checkboxes into`);
+  
+  loadState().then(state => {
+    const selected = new Set(Object.keys(state).filter(k => state[k]));
+    rows.forEach((row, index) => {
+      // Remove any existing checkbox wrapper
+      const oldWrapper = row.querySelector('.ghx-checkbox-wrapper');
+      if (oldWrapper) oldWrapper.remove();
+      
+      let id = getId(row);
+      if (!id) {
+        console.log(`Skipping row ${index} - no ID`);
+        return;
+      }
+      
+      console.log(`Injecting checkbox for row ${index}: ${id}`);
+      
+      // Make row positioned so absolute positioning works
+      row.classList.add('ghx-row-positioned');
+      
+      // Create wrapper for absolute positioning
+      const wrapper = document.createElement('span');
+      wrapper.className = 'ghx-checkbox-wrapper';
+      
+      // Create checkbox
+      const chk = document.createElement('input');
+      chk.type = 'checkbox';
+      chk.className = 'ghx-row-checkbox';
+      chk.checked = selected.has(id);
+      chk.tabIndex = 0;
+      chk.setAttribute('aria-label', `Select ${id}`);
+      chk.onclick = e => {
+        e.stopPropagation();
+        onCheckboxChange(id, chk.checked, e);
+      };
+      
+      wrapper.appendChild(chk);
+      row.appendChild(wrapper);
+      
+      // Visual highlight
+      row.classList.toggle('ghx-selected-row', selected.has(id));
+    });
+    updateBulkBar(selected, rows.length);
+  });
+}
+
+function getId(row) {
+  const link = row.querySelector('a[href*="/blob/"], a[href*="/tree/"]');
+  if (link) {
+    const href = link.getAttribute('href') || link.href;
+    const filename = link.textContent.trim();
+    // Use filename as ID, fallback to URL parts
+    return filename || href.split('/').pop() || 'unknown';
+  }
+  return row.dataset.path || row.dataset.issueId || row.dataset.id || row.getAttribute('id') || row.innerText.trim().substring(0, 50);
+}
+
+async function saveState(state) {
+  chrome.storage.local.set({ [STORAGE_KEY()]: state });
+}
+async function loadState() {
+  return new Promise(res =>
+    chrome.storage.local.get([STORAGE_KEY()], r => res(r[STORAGE_KEY()] || {}))
+  );
+}
+
+async function updateBulkBar(selected, total) {
+  let bar = $(`#${BULK_BAR_ID}`);
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.id = BULK_BAR_ID;
+    document.body.appendChild(bar);
+  }
+  
+  // Check current state from actual checkboxes
+  const checkedBoxes = document.querySelectorAll('.ghx-row-checkbox:checked');
+  const totalBoxes = document.querySelectorAll('.ghx-row-checkbox');
+  const allSelected = checkedBoxes.length === totalBoxes.length && totalBoxes.length > 0;
+  
+  console.log(`UpdateBulkBar: ${checkedBoxes.length}/${totalBoxes.length} checkboxes checked, allSelected=${allSelected}`);
+  
+  const buttonText = allSelected ? 'Deselect All' : 'Select All';
+  
+  bar.innerHTML = `
+    <b>${checkedBoxes.length}</b> selected
+    <button id="ghx-sel-all">${buttonText}</button>
+  `;
+  
+  $('#ghx-sel-all', bar).onclick = () => {
+    console.log(`Select All button clicked: will ${allSelected ? 'deselect' : 'select'} all`);
+    toggleSelectAll(!allSelected);
+  };
+  
+  bar.style.display = totalBoxes.length > 0 ? 'flex' : 'none';
+  
+  // Update main download button text
+  updateMainDownloadButtonText(checkedBoxes.length);
+}
+
+function updateMainDownloadButtonText(selectedCount) {
+  if (!mainDownloadButton) return;
+  
+  const buttonElement = mainDownloadButton.querySelector('a') || mainDownloadButton.querySelector('button');
+  if (!buttonElement) return;
+  
+  const span = buttonElement.querySelector('span[data-content]') || buttonElement.querySelector('span');
+  
+  if (selectedCount === 0) {
+    if (span) {
+      span.textContent = 'Download Repository';
+    } else {
+      buttonElement.textContent = 'Download Repository';
+    }
+    buttonElement.style.backgroundColor = '#2ea44f';
+  } else {
+    const text = selectedCount === 1 ? 
+      `Download Selected (1 item)` : 
+      `Download Selected (${selectedCount} items)`;
+    
+    if (span) {
+      span.textContent = text;
+    } else {
+      buttonElement.textContent = text;
+    }
+    buttonElement.style.backgroundColor = '#0969da';
+  }
+}
+
+async function toggleSelectAll(selectAll) {
+  console.log(`toggleSelectAll called with selectAll=${selectAll}`);
+  const rows = getRows();
+  const state = {};
+  
+  // Set all items to the desired state
+  rows.forEach(row => {
+    let id = getId(row);
+    if (id) {
+      state[id] = selectAll;
+    }
+  });
+  
+  await saveState(state);
+  
+  // Update all checkbox states
+  updateAllRowStates(state);
+  
+  // Update bulk bar with actual checkbox counts
+  const checkedBoxes = document.querySelectorAll('.ghx-row-checkbox:checked');
+  const totalBoxes = document.querySelectorAll('.ghx-row-checkbox');
+  
+  console.log(`After toggle: ${checkedBoxes.length}/${totalBoxes.length} checkboxes selected`);
+  
+  updateBulkBar(new Set(), totalBoxes.length);
+}
+
+async function onCheckboxChange(id, checked, e) {
+  console.log(`Checkbox changed: ${id} = ${checked}`);
+  const state = await loadState();
+  
+  if (e.shiftKey || e.ctrlKey || e.metaKey) {
+    // Multi-select: select all between last and this
+    const rows = getRows();
+    const ids = rows.map(getId);
+    const lastIdx = ids.findIndex(i => state[i]);
+    const thisIdx = ids.indexOf(id);
+    if (lastIdx !== -1 && thisIdx !== -1) {
+      const [from, to] = [lastIdx, thisIdx].sort((a, b) => a - b);
+      for (let i = from; i <= to; i++) state[ids[i]] = true;
+    }
+  } else {
+    state[id] = checked;
+  }
+  
+  await saveState(state);
+  
+  // Update UI immediately with actual checkbox counts
+  const checkedBoxes = document.querySelectorAll('.ghx-row-checkbox:checked');
+  const totalBoxes = document.querySelectorAll('.ghx-row-checkbox');
+  
+  console.log(`After checkbox change: ${checkedBoxes.length}/${totalBoxes.length} selected`);
+  
+  // Update all visual states
+  updateAllRowStates(state);
+  updateBulkBar(new Set(), totalBoxes.length);
+}
+
+function updateAllRowStates(state) {
+  const rows = getRows();
+  rows.forEach(row => {
+    const id = getId(row);
+    const isSelected = state[id] || false;
+    
+    // Update checkbox only - no row highlighting
+    const chk = row.querySelector('.ghx-row-checkbox');
+    if (chk) {
+      chk.checked = isSelected;
+    }
+  });
+}
+
+function observe() {
+  let lastUrl = location.href;
+  const reinit = () => setTimeout(injectCheckboxes, 100);
+  new MutationObserver(() => {
+    if (location.href !== lastUrl) {
+      lastUrl = location.href;
+      reinit();
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+  reinit();
+}
+
+// --- Init ---
+injectStyles();
+observe();

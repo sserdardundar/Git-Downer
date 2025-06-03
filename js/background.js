@@ -3,29 +3,44 @@
 // Storage for temporary blobs (will be cleared when the extension is reloaded)
 const blobStorage = new Map();
 
+// Utility functions
+const utils = {
+  sanitizeFilename(name) {
+    return name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+|\.+$/g, '').slice(0, 255);
+  },
+  
+  generateBlobId() {
+    return `blob_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+  },
+  
+  cleanupBlob(blobId, delay = 15 * 60 * 1000) {
+    setTimeout(() => {
+      if (blobStorage.has(blobId)) {
+        console.log(`Removing expired blob: ${blobId}`);
+        blobStorage.delete(blobId);
+      }
+    }, delay);
+  }
+};
+
 // Listen for messages from content script
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  // Forward progress updates to popup if it's open
-  if (message.action === "updateProgress" || 
-      message.action === "downloadComplete" || 
-      message.action === "downloadError") {
-    
-    // Forward message to all tabs with our extension's content script
-    chrome.tabs.query({}, (tabs) => {
-      tabs.forEach((tab) => {
-        // Only send to github.com tabs
-        if (tab.url && tab.url.includes('github.com')) {
-          chrome.tabs.sendMessage(tab.id, message).catch(() => {
-            // Ignore errors for tabs that don't have our content script
-            // This is normal and expected
-          });
+  const { action } = message;
+  
+  // Forward progress updates to all GitHub tabs
+  if (['updateProgress', 'downloadComplete', 'downloadError'].includes(action)) {
+    chrome.tabs.query({}, tabs => {
+      tabs.forEach(tab => {
+        if (tab.url?.includes('github.com')) {
+          chrome.tabs.sendMessage(tab.id, message).catch(() => {});
         }
       });
     });
+    return;
   }
   
   // Handle executeScript action - CSP-compliant script injection
-  if (message.action === "executeScript") {
+  if (action === "executeScript") {
     try {
       console.log("Executing script via chrome.scripting API");
       
@@ -65,7 +80,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handle storing a blob for download
-  if (message.action === "storeBlob") {
+  if (action === "storeBlob") {
     try {
       console.log("Received request to store blob for download:", message.filename);
       
@@ -79,8 +94,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
       }
       
-      // Generate a unique ID for this blob
-      const blobId = 'blob_' + Date.now() + '_' + Math.random().toString(36).substring(2, 15);
+      const blobId = utils.generateBlobId();
       
       // Log blob details
       console.log(`Storing blob: id=${blobId}, type=${message.blob.type}, size=${message.blob.size} bytes`);
@@ -88,23 +102,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Store the blob reference
       blobStorage.set(blobId, {
         blob: message.blob,
-        filename: message.filename,
+        filename: utils.sanitizeFilename(message.filename || 'download.zip'),
         timestamp: Date.now(),
         size: message.blob.size
       });
       
       // Set a cleanup timer (remove blob after 15 minutes)
-      setTimeout(() => {
-        if (blobStorage.has(blobId)) {
-          console.log(`Removing expired blob ${blobId}`);
-          blobStorage.delete(blobId);
-        }
-      }, 15 * 60 * 1000);
+      utils.cleanupBlob(blobId);
       
       // Return the blob ID
       sendResponse({ 
         success: true, 
-        blobId: blobId,
+        blobId,
         message: "Blob stored successfully"
       });
     } catch (error) {
@@ -118,8 +127,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handle blob retrieval request from the download page
-  if (message.action === "requestDownloadBlob") {
-    const blobId = message.blobId;
+  if (action === "requestDownloadBlob") {
+    const { blobId } = message;
     console.log("Background script: Request to get download blob", blobId);
     
     if (!blobId || !blobStorage.has(blobId)) {
@@ -164,12 +173,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handle opening the download page
-  if (message.action === "openDownloadPage") {
+  if (action === "openDownloadPage") {
     try {
-      const blobId = message.blobId;
-      const filename = message.filename;
-      const fileSize = message.fileSize || 0;
-      const autoStart = message.autoStart || false;
+      const { blobId, filename, fileSize = 0, autoStart = false } = message;
       
       console.log(`Opening download page for blob ${blobId}, file: ${filename}`);
       
@@ -196,7 +202,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handle direct downloads with blob ID
-  if (message.action === "downloadDirectly") {
+  if (action === "downloadDirectly") {
     try {
       console.log("Received request for direct download:", message.filename);
       
@@ -222,7 +228,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       // Use Chrome's downloads API with more reliable options
       chrome.downloads.download({
         url: url,
-        filename: filename,
+        filename: utils.sanitizeFilename(filename),
         saveAs: message.saveAs || false,
         headers: [
           { name: "Content-Type", "value": "application/zip" }
@@ -277,7 +283,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handle downloadBlob action for data URLs
-  if (message.action === "downloadBlob") {
+  if (action === "downloadBlob") {
     try {
       console.log("Received request to download blob from data URL:", message.filename);
       
@@ -319,7 +325,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Add handler for loading JSZip from background
-  if (message.action === "loadJSZip") {
+  if (action === "loadJSZip") {
     try {
       console.log("Loading JSZip from background service worker");
       
@@ -345,7 +351,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handler for direct URL-based download from download.html
-  if (message.action === "downloadWithUrl") {
+  if (action === "downloadWithUrl") {
     try {
       console.log("Received request for URL-based download:", message.filename);
       
@@ -386,7 +392,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handle opening tabs
-  if (message.action === "openTab") {
+  if (action === "openTab") {
     try {
       console.log("Opening tab:", message.url);
       
@@ -419,52 +425,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
   
   // Handle repository download request (bypasses CORS)
-  if (message.action === "downloadRepositoryZip") {
-    try {
-      console.log("Background script: Downloading repository ZIP:", message.url);
-      
-      // Use Chrome's downloads API directly to download the file
-      // This bypasses CORS issues completely
-      chrome.downloads.download({
-        url: message.url,
-        filename: message.filename || 'repository.zip',
-        conflictAction: 'uniquify'
-      }, (downloadId) => {
-        if (chrome.runtime.lastError) {
-          console.error("Repository download error:", chrome.runtime.lastError);
-          sendResponse({
-            success: false, 
-            error: chrome.runtime.lastError.message
-          });
-        } else if (downloadId === undefined) {
-          console.error("Repository download failed, no ID returned");
-          sendResponse({
-            success: false,
-            error: "Download failed to start"
-          });
-        } else {
-          console.log(`Repository download started with ID: ${downloadId}`);
-          sendResponse({
-            success: true,
-            downloadId: downloadId,
-            message: "Repository download initiated directly"
-          });
-        }
-      });
-      
-      return true; // Keep message channel open for async response
-    } catch (error) {
-      console.error("Error handling repository download:", error);
-      sendResponse({
-        success: false,
-        error: error.message
-      });
-      return true;
-    }
+  if (action === "downloadRepositoryZip") {
+    handleRepositoryZipDownload(message, sendResponse);
+    return true;
   }
   
   // Handle repository download request for subdirectory extraction
-  if (message.action === "downloadRepositoryForExtraction") {
+  if (action === "downloadRepositoryForExtraction") {
     try {
       console.log("Background script: Downloading repository ZIP for extraction:", message.url);
       
@@ -608,6 +575,84 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Could be used to get the current download status if implemented
     sendResponse({ status: "idle" });
   }
+});
+
+// Repository ZIP download handler
+function handleRepositoryZipDownload(message, sendResponse) {
+  const { url, filename, timeoutMs = 120000 } = message;
+  
+  if (!url) {
+    sendResponse({ success: false, error: 'No URL provided' });
+    return;
+  }
+  
+  console.log(`Starting repository ZIP download: ${url}`);
+  
+  const timeoutId = setTimeout(() => {
+    sendResponse({ success: false, error: 'Download timeout' });
+  }, timeoutMs);
+  
+  // Use fetch with timeout
+  const controller = new AbortController();
+  const fetchTimeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  
+  fetch(url, { 
+    signal: controller.signal,
+    method: 'GET',
+    cache: 'no-store'
+  })
+  .then(response => {
+    clearTimeout(fetchTimeoutId);
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    }
+    
+    return response.blob();
+  })
+  .then(blob => {
+    console.log(`Repository ZIP fetched: ${blob.size} bytes`);
+    
+    // Store the blob
+    const blobId = utils.generateBlobId();
+    
+    blobStorage.set(blobId, {
+      blob: blob,
+      filename: utils.sanitizeFilename(filename),
+      timestamp: Date.now(),
+      size: blob.size,
+      originalUrl: url
+    });
+    
+    utils.cleanupBlob(blobId);
+    
+    sendResponse({
+      success: true,
+      blobId: blobId,
+      size: blob.size,
+      filename: utils.sanitizeFilename(filename),
+      message: 'Repository ZIP downloaded successfully'
+    });
+  })
+  .catch(error => {
+    clearTimeout(fetchTimeoutId);
+    clearTimeout(timeoutId);
+    
+    console.error('Repository ZIP download failed:', error);
+    
+    if (error.name === 'AbortError') {
+      sendResponse({ success: false, error: 'Download was aborted due to timeout' });
+    } else {
+      sendResponse({ success: false, error: error.message });
+    }
+  });
+}
+
+// Cleanup old blobs on extension startup
+chrome.runtime.onStartup.addListener(() => {
+  blobStorage.clear();
+  console.log('Extension startup: Cleared blob storage');
 });
 
 // Log that the service worker has started
