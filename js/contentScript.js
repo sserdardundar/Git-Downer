@@ -1673,6 +1673,7 @@ async function downloadSelectedItemsFromCheckboxes() {
     let completedItems = 0;
     let failedItems = 0;
     const totalItems = selectedIds.length;
+    let criticalErrors = 0; // Track API/permission errors
     
     // Get all rows to find the corresponding file info for each selected ID
     const rows = getRows();
@@ -1711,17 +1712,27 @@ async function downloadSelectedItemsFromCheckboxes() {
             const dirRepoInfo = { ...repoInfo, branch };
             
             // Download directory recursively
-            await processDirectoryConcurrent(
-              dirRepoInfo,
-              dirPath,
-              zip,
-              dirPath,
-              (progress) => {
-                if (progress?.type === 'progress') {
-                  sendProgressUpdate(`Processing ${selectedId}: ${progress.completed || 0} files downloaded`);
+            try {
+              await processDirectoryConcurrent(
+                dirRepoInfo,
+                dirPath,
+                zip,
+                dirPath,
+                (progress) => {
+                  if (progress?.type === 'progress') {
+                    sendProgressUpdate(`Processing ${selectedId}: ${progress.completed || 0} files downloaded`);
+                  }
                 }
+              );
+            } catch (dirError) {
+              console.error(`Failed to download directory ${selectedId}:`, dirError);
+              // Check if it's a critical API error
+              if (dirError.message.includes('403') || dirError.message.includes('API request failed')) {
+                criticalErrors++;
               }
-            );
+              failedItems++;
+              continue;
+            }
           }
         } else {
           // Download individual file
@@ -1732,16 +1743,43 @@ async function downloadSelectedItemsFromCheckboxes() {
             const filePath = pathParts.slice(1).join('/');
             
             const fileRepoInfo = { ...repoInfo, branch };
-            const fileData = await downloadFile(fileRepoInfo, filePath);
-            zip.file(selectedId, fileData);
+            try {
+              const fileData = await downloadFile(fileRepoInfo, filePath);
+              zip.file(selectedId, fileData);
+            } catch (fileError) {
+              console.error(`Failed to download file ${selectedId}:`, fileError);
+              // Check if it's a critical API error
+              if (fileError.message.includes('403') || fileError.message.includes('API request failed')) {
+                criticalErrors++;
+              }
+              failedItems++;
+              continue;
+            }
           }
         }
         
         completedItems++;
       } catch (error) {
         console.error(`Failed to download ${selectedId}:`, error);
+        // Check if it's a critical API error
+        if (error.message.includes('403') || error.message.includes('API request failed')) {
+          criticalErrors++;
+        }
         failedItems++;
       }
+    }
+    
+    // Check if we should abort due to too many failures or critical errors
+    if (completedItems === 0 && failedItems > 0) {
+      throw new Error(`All downloads failed. This may be due to API rate limiting, permission issues, or network problems.`);
+    }
+    
+    if (criticalErrors >= Math.min(3, Math.ceil(totalItems * 0.5))) {
+      throw new Error(`Too many API errors (${criticalErrors}). This may be due to rate limiting or permission issues. Please try again later.`);
+    }
+    
+    if (completedItems === 0) {
+      throw new Error("No files were successfully downloaded.");
     }
     
     sendProgressUpdate("Creating ZIP file...", 75);
@@ -1768,7 +1806,7 @@ async function downloadSelectedItemsFromCheckboxes() {
     await triggerDownload(zipBlob, fileName);
     
     const message = failedItems > 0 ? 
-      `Download completed with ${failedItems} failed items` : 
+      `Download completed with ${failedItems} failed items (${completedItems} successful)` : 
       "Download completed successfully!";
     
     sendProgressUpdate(message, 100);
