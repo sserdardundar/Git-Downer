@@ -197,9 +197,7 @@
       .onboarding-card {
         position: relative;
         padding: 12px;
-        border: 1px solid var(--gd-border);
-        border: 1px solid
-          color-mix(in srgb, var(--gd-accent) 45%, var(--gd-border));
+        border: 1px solid color-mix(in srgb, var(--gd-accent) 45%, var(--gd-border));
         border-radius: 8px;
         background: var(--gd-surface);
         box-shadow: 0 8px 22px rgba(0, 0, 0, 0.14);
@@ -517,6 +515,253 @@
       .copy-btn:hover {
         background: var(--gd-border);
       }
+
+      /* ── Branch picker ─────────────────────────────────────────────────── */
+      .branch-row {
+        display: none;
+        align-items: center;
+        gap: 8px;
+      }
+
+      .branch-label {
+        font-size: 11px;
+        font-weight: 600;
+        color: var(--gd-muted);
+        white-space: nowrap;
+        flex-shrink: 0;
+      }
+
+      .branch-picker {
+        flex: 1;
+        position: relative;
+        min-width: 0;
+      }
+
+      /* Trigger button — closed state */
+      .branch-trigger {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        width: 100%;
+        padding: 5px 8px;
+        background: var(--gd-surface-alt);
+        border: 1px solid var(--gd-border);
+        border-radius: 6px;
+        color: var(--gd-text);
+        font-family: inherit;
+        font-size: 12px;
+        cursor: pointer;
+        text-align: left;
+        transition: border-color 0.15s;
+      }
+
+      .branch-trigger:hover:not(:disabled) { border-color: var(--gd-accent); }
+      .branch-trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+      .branch-trigger[aria-expanded="true"] {
+        border-color: var(--gd-accent);
+        border-bottom-left-radius: 0;
+        border-bottom-right-radius: 0;
+      }
+
+      .branch-trigger-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .branch-icon { color: var(--gd-muted); flex-shrink: 0; }
+
+      .branch-caret {
+        flex-shrink: 0;
+        color: var(--gd-muted);
+        transition: transform 0.15s;
+      }
+      .branch-trigger[aria-expanded="true"] .branch-caret { transform: rotate(180deg); }
+
+      /* Dropdown panel */
+      .branch-panel {
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: var(--gd-surface);
+        border: 1px solid var(--gd-accent);
+        border-top: none;
+        border-bottom-left-radius: 6px;
+        border-bottom-right-radius: 6px;
+        box-shadow: 0 6px 16px rgba(0,0,0,0.25);
+        z-index: 500;
+        overflow: hidden;
+      }
+
+      .branch-panel-search {
+        padding: 6px;
+        border-bottom: 1px solid var(--gd-border);
+      }
+
+      .branch-search-input {
+        width: 100%;
+        padding: 5px 8px;
+        background: var(--gd-bg);
+        border: 1px solid var(--gd-border);
+        border-radius: 4px;
+        font-size: 12px;
+        color: var(--gd-text);
+        font-family: inherit;
+        outline: none;
+      }
+      .branch-search-input:focus { border-color: var(--gd-accent); }
+
+      .branch-list {
+        list-style: none;
+        max-height: 180px;
+        overflow-y: auto;
+        padding: 4px 0;
+        margin: 0;
+        scrollbar-width: thin;
+        scrollbar-color: var(--gd-border) transparent;
+      }
+      .branch-list::-webkit-scrollbar { width: 4px; }
+      .branch-list::-webkit-scrollbar-thumb { background: var(--gd-border); border-radius: 2px; }
+
+      .branch-list-item {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 6px 10px;
+        font-size: 12px;
+        cursor: pointer;
+        color: var(--gd-text);
+        user-select: none;
+      }
+      .branch-list-item:hover,
+      .branch-list-item.hl { background: color-mix(in srgb, var(--gd-accent) 12%, transparent); }
+      .branch-list-item.selected .branch-item-name { color: var(--gd-accent); font-weight: 600; }
+
+      .branch-item-check {
+        width: 12px;
+        flex-shrink: 0;
+        color: var(--gd-accent);
+      }
+
+      .branch-item-name {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      .branch-default-tag {
+        font-size: 10px;
+        font-weight: 600;
+        padding: 1px 5px;
+        border-radius: 10px;
+        background: color-mix(in srgb, var(--gd-accent) 14%, transparent);
+        border: 1px solid color-mix(in srgb, var(--gd-accent) 30%, transparent);
+        color: var(--gd-accent);
+        flex-shrink: 0;
+        white-space: nowrap;
+      }
+
+      .branch-no-results {
+        padding: 10px;
+        font-size: 12px;
+        color: var(--gd-muted);
+        text-align: center;
+      }
+
+      /* Path-not-found warning */
+      .branch-path-warning {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
+        padding: 7px 9px;
+        background: color-mix(in srgb, #d29922 12%, transparent);
+        border: 1px solid color-mix(in srgb, #d29922 35%, transparent);
+        border-radius: 6px;
+        font-size: 11px;
+        color: #d29922;
+        line-height: 1.4;
+      }
+      .branch-path-warning[hidden] { display: none; }
+      .branch-path-warning svg { flex-shrink: 0; margin-top: 1px; }
+
+      /* ── Exclusion chips ──────────────────────────────────────────────── */
+      .exclusions-row {
+        display: none; /* shown by JS */
+      }
+
+      .excl-header {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        margin-bottom: 5px;
+      }
+
+      .excl-title {
+        font-size: 10px;
+        font-weight: 700;
+        color: var(--gd-muted);
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+      }
+
+      /* Quiet link — recedes behind the chips */
+      .excl-manage {
+        font-size: 11px;
+        color: var(--gd-muted);
+        text-decoration: none;
+        cursor: pointer;
+        transition: color 0.12s ease;
+      }
+      .excl-manage:hover { color: var(--gd-text); }
+
+      .excl-packs {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 4px;
+      }
+
+      /* Solid, opaque, tag-shaped filter control — not a decorative badge */
+      .excl-chip {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        padding: 2px 7px;
+        background: var(--gd-surface-alt);
+        border: 1px solid var(--gd-border);
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: 500;
+        color: var(--gd-text);
+        cursor: pointer;
+        line-height: 1.6;
+        white-space: nowrap;
+        user-select: none;
+        transition: border-color 0.12s ease, color 0.12s ease;
+      }
+
+      /* Hover: full red signal — intent to remove is unmistakable */
+      .excl-chip:hover {
+        border-color: var(--gd-danger);
+        color: var(--gd-danger);
+      }
+
+      .excl-chip-x {
+        font-size: 12px;
+        font-weight: 300;
+        color: var(--gd-muted);
+        line-height: 1;
+        transition: color 0.12s ease;
+      }
+      .excl-chip:hover .excl-chip-x { color: inherit; }
+
+      /* Empty state: plain muted text, no decoration */
+      .excl-none {
+        font-size: 11px;
+        color: var(--gd-muted);
+      }
     </style>
   </head>
 
@@ -557,6 +802,59 @@
       </button>
 
       <div class="context" id="context">Full Repository</div>
+
+      <div class="branch-row" id="branchRow">
+        <span class="branch-label">Branch</span>
+        <div class="branch-picker" id="branchPicker">
+          <button
+            class="branch-trigger"
+            id="branchTrigger"
+            type="button"
+            aria-haspopup="listbox"
+            aria-expanded="false"
+            aria-controls="branchList"
+            disabled
+          >
+            <svg class="branch-icon" viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+              <path d="M9.5 3.25a2.25 2.25 0 1 1 3 2.122V6A2.5 2.5 0 0 1 10 8.5H6a1 1 0 0 0-1 1v1.128a2.251 2.251 0 1 1-1.5 0V5.372a2.25 2.25 0 1 1 1.5 0v1.836A2.493 2.493 0 0 1 6 7h4a1 1 0 0 0 1-1v-.628A2.25 2.25 0 0 1 9.5 3.25Z"/>
+            </svg>
+            <span class="branch-trigger-name" id="branchTriggerName">Loading…</span>
+            <svg class="branch-caret" viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+              <path d="M4.427 7.427l3.396 3.396a.25.25 0 0 0 .354 0l3.396-3.396A.25.25 0 0 0 11.396 7H4.604a.25.25 0 0 0-.177.427Z"/>
+            </svg>
+          </button>
+          <div class="branch-panel" id="branchPanel" hidden>
+            <div class="branch-panel-search">
+              <input
+                type="text"
+                id="branchSearch"
+                class="branch-search-input"
+                placeholder="Find a branch…"
+                autocomplete="off"
+                spellcheck="false"
+                aria-label="Search branches"
+                aria-autocomplete="list"
+                aria-controls="branchList"
+              />
+            </div>
+            <ul class="branch-list" id="branchList" role="listbox" aria-label="Branches"></ul>
+          </div>
+        </div>
+      </div>
+      <div class="branch-path-warning" id="branchPathWarning" hidden>
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="currentColor" aria-hidden="true">
+          <path d="M6.457 1.047c.659-1.234 2.427-1.234 3.086 0l6.082 11.378A1.75 1.75 0 0 1 14.082 15H1.918a1.75 1.75 0 0 1-1.543-2.575Zm1.763.707a.25.25 0 0 0-.44 0L1.698 13.132a.25.25 0 0 0 .22.368h12.164a.25.25 0 0 0 .22-.368Zm.53 3.996v2.5a.75.75 0 0 1-1.5 0v-2.5a.75.75 0 0 1 1.5 0ZM9 11a1 1 0 1 1-2 0 1 1 0 0 1 2 0Z"/>
+        </svg>
+        <span id="branchPathWarningText">Path not found on this branch — will download from root</span>
+      </div>
+
+      <div class="exclusions-row" id="exclusionsRow">
+        <div class="excl-header">
+          <span class="excl-title">Exclusions</span>
+          <a id="exclusionsManageLink" href="#" class="excl-manage">Manage ↗</a>
+        </div>
+        <div class="excl-packs" id="exclPacks"></div>
+      </div>
 
       <button class="copy-btn" id="copyUrlBtn">
         <svg viewBox="0 0 16 16" width="14" height="14" fill="currentColor">
@@ -655,7 +953,7 @@
         target="_blank"
         >Report Issue</a
       >
-      <span class="version">v2.3.0</span>
+      <span class="version">v2.4.0</span>
     </div>
 
     <script src="../js/shared.js"></script>

@@ -648,9 +648,6 @@
         transition: max-height 0.4s cubic-bezier(0.16, 1, 0.3, 1);
       }
 
-      .history-collapsible.active {
-        max-height: 400px;
-      }
     </style>
   </head>
 
@@ -666,7 +663,7 @@
           />
           <div>
             <h2>GitHub Smart Downloader</h2>
-            <span class="version">v2.3.0</span>
+            <span class="version">v2.4.0</span>
           </div>
         </div>
         <div
@@ -739,13 +736,84 @@
               </div>
               <p class="description" style="margin-top: 12px">
                 <a
-                  href="https://github.com/settings/tokens/new?scopes=repo&description=GitHub%20Smart%20Downloader%20Chrome%20Extension"
+                  id="generateTokenLink"
+                  href="https://github.com/settings/tokens/new?scopes=repo&description=GitHub%20Smart%20Downloader"
                   target="_blank"
                   rel="noreferrer"
                   >Generate a GitHub token with repo scope</a
                 >
               </p>
               <div class="status-text" id="tokenStatus"></div>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-header" data-icon="🚫">Exclusion Packs</div>
+            <div class="card-body">
+              <p class="description">
+                Select packs to automatically exclude matching top-level paths when
+                downloading a full repository. Active packs are also shown in the
+                popup for quick toggling.
+              </p>
+
+              <style>
+                .excl-pack-item {
+                  display: grid;
+                  grid-template-columns: 16px 1fr;
+                  gap: 10px;
+                  align-items: start;
+                  padding: 10px 0;
+                  border-bottom: 1px solid var(--gd-border);
+                  cursor: pointer;
+                }
+                .excl-pack-item:last-child { border-bottom: none; }
+                .excl-pack-item input { margin-top: 2px; accent-color: var(--gd-accent); cursor: pointer; }
+                .excl-pack-label { display: block; font-size: 13px; font-weight: 600; color: var(--gd-text); }
+                .excl-pack-paths { display: block; font-size: 11px; color: var(--gd-muted); font-family: ui-monospace, monospace; margin-top: 2px; }
+                .excl-custom-item { display: flex; align-items: flex-start; gap: 8px; }
+                .excl-custom-item .excl-pack-item { flex: 1; border-bottom: 1px solid var(--gd-border); }
+                .excl-delete-btn {
+                  background: none; border: 1px solid var(--gd-border); border-radius: 6px;
+                  color: var(--gd-muted); cursor: pointer; padding: 4px 8px; font-size: 11px;
+                  margin-top: 8px; transition: all 0.2s; flex-shrink: 0;
+                }
+                .excl-delete-btn:hover { background: var(--gd-danger); border-color: var(--gd-danger); color: white; }
+                .excl-empty { font-size: 12px; color: var(--gd-muted); padding: 8px 0; }
+                .excl-section-title {
+                  font-size: 11px; font-weight: 700; text-transform: uppercase;
+                  letter-spacing: 0.05em; color: var(--gd-muted); margin: 16px 0 8px;
+                }
+                .excl-section-title:first-child { margin-top: 0; }
+                .add-pack-form { display: grid; gap: 8px; margin-top: 8px; }
+                .add-pack-form input, .add-pack-form textarea {
+                  width: 100%; padding: 8px 10px; border: 1px solid var(--gd-border);
+                  border-radius: 6px; font-size: 12px; background: var(--gd-bg);
+                  color: var(--gd-text); resize: vertical;
+                }
+                .add-pack-form textarea { min-height: 60px; font-family: ui-monospace, monospace; }
+                .add-pack-form input:focus, .add-pack-form textarea:focus {
+                  outline: none; border-color: var(--gd-accent);
+                }
+                .add-pack-hint { font-size: 11px; color: var(--gd-muted); }
+              </style>
+
+              <div class="excl-section-title">Built-in packs</div>
+              <div id="builtinPackList"></div>
+
+              <div class="excl-section-title" style="margin-top: 20px;">Custom packs</div>
+              <div id="customPackList"></div>
+
+              <details style="margin-top: 12px;">
+                <summary style="cursor: pointer; font-size: 13px; font-weight: 600; color: var(--gd-accent); user-select: none;">
+                  + Add custom pack
+                </summary>
+                <div class="add-pack-form" id="addPackForm" style="margin-top: 10px;">
+                  <input type="text" id="newPackName" placeholder="Pack name (e.g. Rust)" />
+                  <textarea id="newPackPaths" placeholder="Paths to exclude, one per line or comma-separated&#10;e.g. target&#10;.cargo"></textarea>
+                  <p class="add-pack-hint">Top-level directory names only. Applies when downloading full repos.</p>
+                  <button class="btn btn-primary" id="addPackBtn" style="justify-self: start;">Add Pack</button>
+                </div>
+              </details>
             </div>
           </div>
 
@@ -835,65 +903,6 @@
             <div class="card-header" data-icon="⚡">Engine Configuration</div>
             <div class="card-body">
               <div class="setting-item">
-                <div class="setting-info">
-                  <div class="setting-label">ZIP Compression Level</div>
-                  <div class="setting-desc">
-                    Level 0 (Store) is fastest. Levels 1-9 (Deflate) reduce file
-                    size but increase processing time.
-                  </div>
-                </div>
-                <div class="setting-control">
-                  <div
-                    style="
-                      display: flex;
-                      align-items: center;
-                      gap: 12px;
-                      width: 100%;
-                    "
-                  >
-                    <input
-                      type="range"
-                      id="zipCompressionLevel"
-                      min="0"
-                      max="9"
-                      step="1"
-                      value="0"
-                      style="flex: 1; accent-color: var(--gd-accent)"
-                    />
-                    <span
-                      id="compressionValue"
-                      style="
-                        font-weight: 600;
-                        width: 60px;
-                        text-align: right;
-                        font-variant-numeric: tabular-nums;
-                      "
-                      >Store (0)</span
-                    >
-                  </div>
-                </div>
-              </div>
-              <p
-                class="description"
-                style="
-                  margin-top: 8px;
-                  color: var(--gd-danger);
-                  font-size: 11px;
-                  font-weight: 500;
-                "
-              >
-                ⚠️ Warning: Higher compression levels significantly increase ZIP
-                generation time, especially for large repositories.
-              </p>
-
-              <div
-                class="setting-item"
-                style="
-                  border-top: 1px solid var(--gd-border);
-                  padding-top: 20px;
-                  margin-top: 20px;
-                "
-              >
                 <div class="setting-info">
                   <div class="setting-label">Memory Usage Limit</div>
                   <div class="setting-desc">

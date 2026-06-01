@@ -1,5 +1,6 @@
 const {
   describeRateLimitWait,
+  EXCLUSION_PACKS,
   formatBytes,
   formatRateLimitReset,
   generateZipFilename,
@@ -9,7 +10,9 @@ const {
   parseGitHubUrl,
   parseRateLimitHeaders,
   planDownloadStrategy,
+  resolveExcludedPaths,
   sanitizeFilename,
+  buildRawUrl,
 } = require("../js/shared");
 
 function headers(values) {
@@ -273,6 +276,98 @@ describe("download strategy planner", () => {
     ).toBe("selectedRecursiveZip");
   });
 });
+describe("buildRawUrl", () => {
+  test("uses the given ref when it is a real branch name", () => {
+    const repoInfo = { owner: "acme", repo: "repo", ref: "develop" };
+    expect(buildRawUrl(repoInfo, "src/index.ts")).toBe(
+      "https://raw.githubusercontent.com/acme/repo/develop/src/index.ts",
+    );
+  });
+
+  test("falls back to HEAD (not 'main') when ref is HEAD", () => {
+    const repoInfo = { owner: "acme", repo: "repo", ref: "HEAD" };
+    expect(buildRawUrl(repoInfo, "README.md")).toBe(
+      "https://raw.githubusercontent.com/acme/repo/HEAD/README.md",
+    );
+  });
+
+  test("falls back to HEAD when ref is absent", () => {
+    const repoInfo = { owner: "acme", repo: "repo" };
+    expect(buildRawUrl(repoInfo, "README.md")).toBe(
+      "https://raw.githubusercontent.com/acme/repo/HEAD/README.md",
+    );
+  });
+
+  test("percent-encodes special characters in each path segment individually", () => {
+    const repoInfo = { owner: "acme", repo: "repo", ref: "main" };
+    // slashes between segments must NOT be encoded
+    expect(buildRawUrl(repoInfo, "src/my file.ts")).toBe(
+      "https://raw.githubusercontent.com/acme/repo/main/src/my%20file.ts",
+    );
+  });
+});
+
+describe("EXCLUSION_PACKS and resolveExcludedPaths", () => {
+  test("EXCLUSION_PACKS contains the expected built-in packs", () => {
+    const ids = EXCLUSION_PACKS.map((p) => p.id);
+    expect(ids).toContain("node");
+    expect(ids).toContain("python");
+    expect(ids).toContain("java");
+    expect(ids).toContain("build");
+    expect(ids).toContain("logs");
+    EXCLUSION_PACKS.forEach((p) => {
+      expect(typeof p.label).toBe("string");
+      expect(Array.isArray(p.paths)).toBe(true);
+      expect(p.paths.length).toBeGreaterThan(0);
+    });
+  });
+
+  test("resolveExcludedPaths returns paths for a single active pack", () => {
+    const paths = resolveExcludedPaths(["node"], []);
+    expect(paths).toContain("node_modules");
+    expect(paths.length).toBeGreaterThan(0);
+  });
+
+  test("resolveExcludedPaths merges multiple active packs without duplicates", () => {
+    const paths = resolveExcludedPaths(["node", "python"], []);
+    expect(paths).toContain("node_modules");
+    expect(paths).toContain("__pycache__");
+    // Set-based — no duplicates even if packs share paths
+    expect(paths.length).toBe(new Set(paths).size);
+  });
+
+  test("resolveExcludedPaths includes custom pack paths", () => {
+    const custom = [{ id: "rust", label: "Rust", paths: ["target", ".cargo"] }];
+    const paths = resolveExcludedPaths(["rust"], custom);
+    expect(paths).toContain("target");
+    expect(paths).toContain(".cargo");
+  });
+
+  test("resolveExcludedPaths returns empty array for no active packs", () => {
+    expect(resolveExcludedPaths([], [])).toEqual([]);
+    expect(resolveExcludedPaths(null, null)).toEqual([]);
+  });
+
+  test("resolveExcludedPaths ignores unknown pack IDs silently", () => {
+    const paths = resolveExcludedPaths(["nonexistent_pack"], []);
+    expect(paths).toEqual([]);
+  });
+
+  test("planDownloadStrategy without compressionType input still works (STORE constant)", () => {
+    // compressionType was removed from the input — strategy must not crash
+    const plan = planDownloadStrategy({
+      isRepoRoot: true,
+      totalVisible: 10,
+      selectedCount: 10,
+      selectedDirs: 8,
+      selectedFiles: 2,
+      excludedTopLevelCount: 0,
+      // no compressionType field
+    });
+    expect(plan.strategy).toBe("fullArchive");
+  });
+});
+
 describe("offscreen document", () => {
   const fs = require("fs");
   const path = require("path");

@@ -2,19 +2,35 @@
 (function () {
   "use strict";
 
-  const SHARED_DEFAULTS = window.GitHubSmartDownloaderShared
-    ?.DEFAULT_SETTINGS || {
+  const SHARED = window.GitHubSmartDownloaderShared;
+  const SHARED_DEFAULTS = SHARED?.DEFAULT_SETTINGS || {
     themeMode: "system",
     buttonColor: "#8b5cf6",
     buttonText: "Download Repository",
     buttonStyle: "default",
     namingPolicy: "fullPath",
     githubToken: "",
+    maxCacheSize: 100,
+    activeExclusionPacks: [],
+    customExclusionPacks: [],
   };
+  const BUILTIN_PACKS = SHARED?.EXCLUSION_PACKS || [];
 
   document.addEventListener("DOMContentLoaded", init);
 
   function init() {
+    // Stamp the token-generation link with the current date+time so each click
+    // produces a uniquely named token in GitHub's UI (avoids name collisions).
+    (function stampTokenLink() {
+      const link = document.getElementById("generateTokenLink");
+      if (!link) return;
+      const now = new Date();
+      const p = (n) => String(n).padStart(2, "0");
+      const stamp = `${now.getFullYear()}-${p(now.getMonth() + 1)}-${p(now.getDate())} ${p(now.getHours())}:${p(now.getMinutes())}`;
+      const desc = encodeURIComponent(`GitHub Smart Downloader (${stamp})`);
+      link.href = `https://github.com/settings/tokens/new?scopes=repo&description=${desc}`;
+    })();
+
     const navBtns = document.querySelectorAll(".nav-btn");
     const tabs = document.querySelectorAll(".tab");
 
@@ -32,8 +48,6 @@
     const buttonStyle = document.getElementById("buttonStyle");
     const buttonPosition = document.getElementById("buttonPosition");
 
-    const zipCompressionLevel = document.getElementById("zipCompressionLevel");
-    const compressionValue = document.getElementById("compressionValue");
     const maxCacheSizeSlider = document.getElementById("maxCacheSize");
     const cacheValueDisplay = document.getElementById("cacheValue");
 
@@ -52,6 +66,13 @@
     const resetAllDataBtn = document.getElementById("resetAllDataBtn");
     const refreshHistoryBtn = document.getElementById("refreshHistoryBtn");
     const toastContainer = document.getElementById("toastContainer");
+
+    // Exclusion pack elements
+    const builtinPackList = document.getElementById("builtinPackList");
+    const customPackList = document.getElementById("customPackList");
+    const newPackName = document.getElementById("newPackName");
+    const newPackPaths = document.getElementById("newPackPaths");
+    const addPackBtn = document.getElementById("addPackBtn");
 
     function showToast(message, type = "success") {
       if (!toastContainer) return;
@@ -81,14 +102,12 @@
       btn.addEventListener("click", () => {
         const tabId = btn.dataset.tab;
 
-        // Sync Nav Buttons
         navBtns.forEach((b) => {
           const isActive = b.dataset.tab === tabId;
           b.classList.toggle("active", isActive);
           b.setAttribute("aria-selected", isActive);
         });
 
-        // Sync Tab Panels
         tabs.forEach((t) => {
           const isActive = t.id === tabId;
           t.classList.toggle("active", isActive);
@@ -107,6 +126,8 @@
     }
 
     loadSettings();
+
+    // ─── Token management ──────────────────────────────────────────────────────
 
     saveTokenBtn?.addEventListener("click", async () => {
       const token = tokenInput?.value.trim();
@@ -151,25 +172,36 @@
       updateTokenDisplayStatus("", false);
     });
 
-    async function getEncryptionKey() {
+    // ─── Encryption helpers ────────────────────────────────────────────────────
+    // Ciphertext format v2: 0x02 + 16B random salt + 12B IV + ciphertext
+    // Ciphertext format v1 (legacy): 12B IV + ciphertext (fixed salt)
+
+    async function getEncryptionPassphrase() {
       return new Promise((resolve) => {
-        chrome.storage.local.get("tokenKeyMaterial", async (res) => {
-          let material = res.tokenKeyMaterial;
-          if (!material) {
-            material = crypto.randomUUID();
-            await chrome.storage.local.set({ tokenKeyMaterial: material });
+        // Migrate from local → sync so cross-device decryption works
+        chrome.storage.local.get("tokenKeyMaterial", (localRes) => {
+          if (localRes.tokenKeyMaterial) {
+            const material = localRes.tokenKeyMaterial;
+            chrome.storage.sync.set({ tokenKeyMaterial: material }, () => {
+              chrome.storage.local.remove("tokenKeyMaterial");
+            });
+            resolve(material);
+            return;
           }
-          const key = await generateKey(material);
-          resolve(key);
+          chrome.storage.sync.get("tokenKeyMaterial", async (syncRes) => {
+            let material = syncRes.tokenKeyMaterial;
+            if (!material) {
+              material = crypto.randomUUID();
+              await chrome.storage.sync.set({ tokenKeyMaterial: material });
+            }
+            resolve(material);
+          });
         });
       });
     }
 
-    async function generateKey(passphrase) {
+    async function generateKey(passphrase, salt) {
       const enc = new TextEncoder();
-      const fixedSalt = new Uint8Array([
-        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-      ]);
       const baseKey = await crypto.subtle.importKey(
         "raw",
         enc.encode(passphrase),
@@ -180,7 +212,7 @@
       return crypto.subtle.deriveKey(
         {
           name: "PBKDF2",
-          salt: fixedSalt,
+          salt: salt,
           iterations: 100000,
           hash: "SHA-256",
         },
@@ -192,23 +224,49 @@
     }
 
     async function encryptToken(token) {
-      const key = await getEncryptionKey();
+      const passphrase = await getEncryptionPassphrase();
+      const salt = crypto.getRandomValues(new Uint8Array(16));
       const iv = crypto.getRandomValues(new Uint8Array(12));
+      const key = await generateKey(passphrase, salt);
       const enc = new TextEncoder();
       const ciphertext = await crypto.subtle.encrypt(
         { name: "AES-GCM", iv },
         key,
         enc.encode(token),
       );
-      const combined = new Uint8Array(iv.length + ciphertext.byteLength);
-      combined.set(iv);
-      combined.set(new Uint8Array(ciphertext), iv.length);
-      return btoa(String.fromCharCode(...combined));
+      // v2 format: "gsdv2:" prefix + base64(salt[16] + iv[12] + ciphertext)
+      // The string prefix is an unambiguous discriminator — no collision with v1 base64 blobs.
+      const combined = new Uint8Array(salt.length + iv.length + ciphertext.byteLength);
+      combined.set(salt, 0);
+      combined.set(iv, 16);
+      combined.set(new Uint8Array(ciphertext), 28);
+      return "gsdv2:" + btoa(String.fromCharCode(...combined));
     }
 
     async function decryptToken(data) {
-      const key = await getEncryptionKey();
+      const passphrase = await getEncryptionPassphrase();
+
+      // v2 format: "gsdv2:" prefix + base64(salt[16] + iv[12] + ciphertext)
+      if (data.startsWith("gsdv2:")) {
+        const combined = Uint8Array.from(atob(data.slice(6)), (c) => c.charCodeAt(0));
+        const salt = combined.slice(0, 16);
+        const iv = combined.slice(16, 28);
+        const ciphertext = combined.slice(28);
+        const key = await generateKey(passphrase, salt);
+        const plaintext = await crypto.subtle.decrypt(
+          { name: "AES-GCM", iv },
+          key,
+          ciphertext,
+        );
+        return new TextDecoder().decode(plaintext);
+      }
+
+      // v1 legacy format: base64(iv[12] + ciphertext), fixed salt
       const combined = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+      const fixedSalt = new Uint8Array([
+        1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+      ]);
+      const key = await generateKey(passphrase, fixedSalt);
       const iv = combined.slice(0, 12);
       const ciphertext = combined.slice(12);
       const plaintext = await crypto.subtle.decrypt(
@@ -264,27 +322,7 @@
       }
     }
 
-    function updateCompressionDisplay(level) {
-      if (!compressionValue) return;
-      const val = parseInt(level, 10);
-      if (val === 0) {
-        compressionValue.textContent = "Store (0)";
-      } else {
-        compressionValue.textContent = `Level ${val}`;
-      }
-    }
-
-    if (zipCompressionLevel) {
-      zipCompressionLevel.addEventListener("input", () => {
-        const val = zipCompressionLevel.value;
-        updateCompressionDisplay(val);
-      });
-      zipCompressionLevel.addEventListener("change", () => {
-        chrome.storage.sync.set({
-          zipCompressionLevel: parseInt(zipCompressionLevel.value, 10),
-        });
-      });
-    }
+    // ─── Cache size slider ─────────────────────────────────────────────────────
 
     if (maxCacheSizeSlider) {
       maxCacheSizeSlider.addEventListener("input", () => {
@@ -298,6 +336,8 @@
       });
     }
 
+    // ─── Naming policy ─────────────────────────────────────────────────────────
+
     namingRadios.forEach((radio) => {
       radio.addEventListener("change", () => {
         chrome.storage.sync.set({ namingPolicy: radio.value });
@@ -305,12 +345,138 @@
       });
     });
 
+    // ─── Appearance ────────────────────────────────────────────────────────────
+
     if (themeSelect) themeSelect.addEventListener("change", saveAppearance);
     if (buttonColor) buttonColor.addEventListener("input", saveAppearance);
     if (buttonText) buttonText.addEventListener("input", saveAppearance);
     if (buttonStyle) buttonStyle.addEventListener("change", saveAppearance);
     if (buttonPosition)
       buttonPosition.addEventListener("change", saveAppearance);
+
+    // ─── Exclusion packs ───────────────────────────────────────────────────────
+
+    let activeExclusionPacks = [];
+    let customExclusionPacks = [];
+
+    function renderExclusionPacks() {
+      if (!builtinPackList) return;
+
+      builtinPackList.innerHTML = "";
+      BUILTIN_PACKS.forEach((pack) => {
+        const isActive = activeExclusionPacks.includes(pack.id);
+        const item = document.createElement("label");
+        item.className = "excl-pack-item";
+        item.innerHTML = `
+          <input type="checkbox" class="excl-pack-check" data-pack-id="${pack.id}" ${isActive ? "checked" : ""} />
+          <span class="excl-pack-label">${escapeHtml(pack.label)}</span>
+          <span class="excl-pack-paths">${pack.paths.join(", ")}</span>
+        `;
+        item.querySelector("input").addEventListener("change", (e) => {
+          if (e.target.checked) {
+            if (!activeExclusionPacks.includes(pack.id))
+              activeExclusionPacks.push(pack.id);
+          } else {
+            activeExclusionPacks = activeExclusionPacks.filter(
+              (id) => id !== pack.id,
+            );
+          }
+          chrome.storage.sync.set({ activeExclusionPacks });
+        });
+        builtinPackList.appendChild(item);
+      });
+
+      renderCustomPacks();
+    }
+
+    function renderCustomPacks() {
+      if (!customPackList) return;
+      customPackList.innerHTML = "";
+
+      if (customExclusionPacks.length === 0) {
+        customPackList.innerHTML =
+          '<p class="excl-empty">No custom packs yet.</p>';
+        return;
+      }
+
+      customExclusionPacks.forEach((pack) => {
+        const isActive = activeExclusionPacks.includes(pack.id);
+        const item = document.createElement("div");
+        item.className = "excl-custom-item";
+        item.innerHTML = `
+          <label class="excl-pack-item">
+            <input type="checkbox" class="excl-pack-check" data-pack-id="${pack.id}" ${isActive ? "checked" : ""} />
+            <span class="excl-pack-label">${escapeHtml(pack.label)}</span>
+            <span class="excl-pack-paths">${pack.paths.map(escapeHtml).join(", ")}</span>
+          </label>
+          <button class="excl-delete-btn" data-pack-id="${pack.id}" title="Delete pack">✕</button>
+        `;
+        item.querySelector(".excl-pack-check").addEventListener("change", (e) => {
+          if (e.target.checked) {
+            if (!activeExclusionPacks.includes(pack.id))
+              activeExclusionPacks.push(pack.id);
+          } else {
+            activeExclusionPacks = activeExclusionPacks.filter(
+              (id) => id !== pack.id,
+            );
+          }
+          chrome.storage.sync.set({ activeExclusionPacks });
+        });
+        item.querySelector(".excl-delete-btn").addEventListener("click", () => {
+          customExclusionPacks = customExclusionPacks.filter(
+            (p) => p.id !== pack.id,
+          );
+          activeExclusionPacks = activeExclusionPacks.filter(
+            (id) => id !== pack.id,
+          );
+          chrome.storage.sync.set({ customExclusionPacks, activeExclusionPacks });
+          renderCustomPacks();
+        });
+        customPackList.appendChild(item);
+      });
+    }
+
+    if (addPackBtn) {
+      addPackBtn.addEventListener("click", () => {
+        const name = newPackName?.value.trim();
+        const rawPaths = newPackPaths?.value.trim();
+
+        if (!name) {
+          showToast("Pack name is required", "error");
+          return;
+        }
+        if (!rawPaths) {
+          showToast("At least one path is required", "error");
+          return;
+        }
+
+        const paths = rawPaths
+          .split(/[\n,]+/)
+          .map((p) => p.trim())
+          .filter(Boolean);
+
+        if (paths.length === 0) {
+          showToast("No valid paths entered", "error");
+          return;
+        }
+
+        const newPack = {
+          id: "custom_" + Date.now(),
+          label: name,
+          paths,
+        };
+        customExclusionPacks.push(newPack);
+        activeExclusionPacks.push(newPack.id);
+        chrome.storage.sync.set({ customExclusionPacks, activeExclusionPacks });
+
+        if (newPackName) newPackName.value = "";
+        if (newPackPaths) newPackPaths.value = "";
+        renderCustomPacks();
+        showToast(`Pack "${name}" added`);
+      });
+    }
+
+    // ─── Import / Export ───────────────────────────────────────────────────────
 
     exportBtn?.addEventListener("click", async () => {
       const settings = await chrome.storage.sync.get(null);
@@ -370,7 +536,6 @@
         loadStatistics();
         showToast("History & Statistics updated");
 
-        // Visual feedback - rotate the SVG icon
         const svg = refreshHistoryBtn.querySelector("svg");
         if (svg) {
           svg.style.transform = "rotate(360deg)";
@@ -407,6 +572,8 @@
     loadRateLimit();
     loadStatistics();
 
+    // ─── Load settings ─────────────────────────────────────────────────────────
+
     async function loadSettings() {
       try {
         const settings = await chrome.storage.sync.get(SHARED_DEFAULTS);
@@ -426,16 +593,20 @@
         if (buttonText) buttonText.value = settings.buttonText;
         if (buttonStyle) buttonStyle.value = settings.buttonStyle;
         if (buttonPosition) buttonPosition.value = settings.buttonPosition;
-        if (zipCompressionLevel) {
-          zipCompressionLevel.value = settings.zipCompressionLevel;
-          updateCompressionDisplay(settings.zipCompressionLevel);
-        }
 
         if (maxCacheSizeSlider) {
           maxCacheSizeSlider.value = settings.maxCacheSize || 100;
           if (cacheValueDisplay)
             cacheValueDisplay.textContent = `${maxCacheSizeSlider.value} MB`;
         }
+
+        activeExclusionPacks = Array.isArray(settings.activeExclusionPacks)
+          ? settings.activeExclusionPacks
+          : [];
+        customExclusionPacks = Array.isArray(settings.customExclusionPacks)
+          ? settings.customExclusionPacks
+          : [];
+        renderExclusionPacks();
 
         applyTheme(settings.themeMode);
         applyAccent(settings.buttonColor);
@@ -486,20 +657,28 @@
             ? value
             : SHARED_DEFAULTS.namingPolicy,
         githubToken: (value) => (typeof value === "string" ? value : ""),
-        zipCompressionLevel: (value) => {
-          const val = parseInt(value, 10);
-          return isNaN(val) ? 0 : Math.max(0, Math.min(9, val));
-        },
         maxCacheSize: (value) => {
           const val = parseInt(value, 10);
           return isNaN(val) ? 100 : Math.max(50, Math.min(1000, val));
         },
+        activeExclusionPacks: (value) =>
+          Array.isArray(value) ? value.filter((v) => typeof v === "string") : [],
+        customExclusionPacks: (value) =>
+          Array.isArray(value)
+            ? value.filter(
+                (p) =>
+                  p &&
+                  typeof p.id === "string" &&
+                  typeof p.label === "string" &&
+                  Array.isArray(p.paths),
+              )
+            : [],
       };
 
       return Object.fromEntries(
         Object.entries(allowed).map(([key, normalize]) => [
           key,
-          normalize(raw[key]),
+          key in raw ? normalize(raw[key]) : SHARED_DEFAULTS[key],
         ]),
       );
     }
@@ -535,7 +714,6 @@
         if (rateBar) {
           rateBar.style.width = percent + "%";
 
-          // Color based on limit
           if (percent < 20) {
             rateBar.style.background = "var(--gd-danger)";
             rateBar.classList.add("pulse-warning");

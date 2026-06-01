@@ -1,5 +1,6 @@
 const {
   parseRateLimitHeaders,
+  buildArchiveUrl,
   buildRawUrl,
   dedupeFilesByPath,
   fetchWithRetry,
@@ -268,7 +269,6 @@ async function handleGenerateZip(
     repoInfo,
     basePath,
     filename,
-    compressionType,
     token: tokenFromMsg,
     jobId,
     mode,
@@ -378,7 +378,7 @@ async function handleGenerateZip(
         const downloadPromise = (async () => {
           try {
             const archiveUrl =
-              window.GitHubSmartDownloaderShared?.buildArchiveUrl(repoInfo);
+              buildArchiveUrl(repoInfo);
             if (!archiveUrl) throw new Error("Could not build archive URL");
             updateBackgroundCacheState(repoKey, "starting");
             chrome.runtime.sendMessage({
@@ -640,11 +640,7 @@ async function handleGenerateZip(
 
     const content = await zip.generateAsync({
       type: "blob",
-      compression: message.compressionType || "STORE",
-      compressionOptions:
-        message.compressionType === "DEFLATE"
-          ? { level: message.compressionLevel || 6 }
-          : undefined,
+      compression: "STORE",
     });
 
     if (signal.aborted) throw new DOMException("Aborted", "AbortError");

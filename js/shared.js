@@ -36,9 +36,18 @@
     buttonPosition: "separate",
     namingPolicy: "fullPath",
     githubToken: "",
-    zipCompressionLevel: 0,
     maxCacheSize: 100,
+    activeExclusionPacks: [],
+    customExclusionPacks: [],
   };
+
+  const EXCLUSION_PACKS = [
+    { id: "node", label: "Node.js", paths: ["node_modules", ".npm", ".yarn", ".pnpm-store"] },
+    { id: "python", label: "Python", paths: ["__pycache__", ".venv", "venv", "env", ".mypy_cache", ".pytest_cache"] },
+    { id: "java", label: "Java / Maven", paths: ["target", ".gradle", "build", "out"] },
+    { id: "build", label: "Build output", paths: ["dist", ".next", ".nuxt", "coverage", ".cache", ".parcel-cache"] },
+    { id: "logs", label: "Logs & temp", paths: ["logs", "tmp", "temp", ".tmp"] },
+  ];
 
   /**
    * Parses a GitHub URL into owner, repo, ref, and path components.
@@ -212,9 +221,19 @@
   }
 
   function buildRawUrl(repoInfo, path) {
-    const ref = repoInfo.ref && repoInfo.ref !== "HEAD" ? repoInfo.ref : "main";
+    const ref = repoInfo.ref && repoInfo.ref !== "HEAD" ? repoInfo.ref : "HEAD";
     const encodedPath = path.split("/").map(encodeURIComponent).join("/");
     return `https://raw.githubusercontent.com/${repoInfo.owner}/${repoInfo.repo}/${ref}/${encodedPath}`;
+  }
+
+  function resolveExcludedPaths(activePackIds, customPacks) {
+    const allPacks = [...EXCLUSION_PACKS, ...(customPacks || [])];
+    const paths = new Set();
+    for (const packId of activePackIds || []) {
+      const pack = allPacks.find((p) => p.id === packId);
+      if (pack) pack.paths.forEach((p) => paths.add(p));
+    }
+    return [...paths];
   }
 
   function dedupeFilesByPath(files) {
@@ -307,7 +326,7 @@
     const isRepoRoot = Boolean(input.isRepoRoot);
     const isSingleFile =
       selectedCount === 1 && selectedFiles === 1 && selectedDirs === 0;
-    const compressionType = input.compressionType || "STORE";
+    const compressionType = "STORE"; // always STORE; compression slider removed
 
     const candidates = [];
 
@@ -469,6 +488,7 @@
 
   const api = {
     DEFAULT_SETTINGS,
+    EXCLUSION_PACKS,
     buildArchiveUrl,
     describeRateLimitWait,
     formatBytes,
@@ -480,6 +500,7 @@
     parseGitHubUrl,
     parseRateLimitHeaders,
     planDownloadStrategy,
+    resolveExcludedPaths,
     sanitizeFilename,
     buildRawUrl,
     dedupeFilesByPath,

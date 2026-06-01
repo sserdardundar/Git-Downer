@@ -17,20 +17,34 @@
 
 ---
 
-## 🚀 Repository Interaction
-
-### 📸 Visual Showcase
+## 📸 Visual Showcase
 
 <div align="center">
-  <table style="border-collapse: collapse; border: none;">
+  <table>
     <tr>
-      <td width="50%" style="border: none; padding: 10px;">
-        <p align="center"><strong>Download Jobs</strong></p>
-        <img src="screenshots/popup.png" alt="Popup Dashboard" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
+      <td width="50%">
+        <p align="center"><strong>Open on any repo</strong></p>
+        <img src="screenshots/popup.png" alt="Popup on a GitHub repository, showing branch picker, exclusion chips, API rate limit, and a one-click Download Repository action.">
       </td>
-      <td width="50%" style="border: none; padding: 10px;">
-        <p align="center"><strong>Settings & Customization</strong></p>
-        <img src="screenshots/settings.png" alt="Settings Page" style="border-radius: 12px; box-shadow: 0 8px 24px rgba(0,0,0,0.3);">
+      <td width="50%">
+        <p align="center"><strong>Find the right branch fast</strong></p>
+        <img src="screenshots/branch.png" alt="Branch picker dropdown with live search filtering branches by name, default branch pinned to the top.">
+      </td>
+    </tr>
+    <tr>
+      <td width="50%">
+        <p align="center"><strong>Tick what you want</strong></p>
+        <img src="screenshots/selection.png" alt="GitHub file listing with row checkboxes; a floating action bar shows selected count and a Download Selected button.">
+      </td>
+      <td width="50%">
+        <p align="center"><strong>Skip node_modules forever</strong></p>
+        <img src="screenshots/settings.png" alt="Settings page showing Exclusion Packs: Node.js, Python, Java/Maven, Build output, Logs &amp; temp, each with the paths it excludes.">
+      </td>
+    </tr>
+    <tr>
+      <td colspan="2">
+        <p align="center"><strong>Watch it work, cancel anytime</strong></p>
+        <img src="screenshots/download.png" alt="Two download toasts stacked: one completed in green, one in progress at 67% with a Cancel button.">
       </td>
     </tr>
   </table>
@@ -41,6 +55,8 @@
 ## ✨ Key Features
 
 - **Granular Selection**: Download individual files, specific directories, or entire repositories.
+- **Branch Picker**: Pick any branch from the popup with live search, paginated up to 1,000 branches; default branch is always pinned to the top.
+- **Exclusion Packs**: Toggle preset path filters (Node.js, Python, Java/Maven, Build output, Logs) or define your own; active packs apply to full-repo downloads as removable chips in the popup.
 - **Offscreen Processing**: Utilizes a dedicated Manifest V3 offscreen document for ZIP generation and background operations.
 - **Shared Archive Cache**: Reuses repository archives across concurrent jobs to reduce duplicate API calls and network overhead.
 - **Selective ZIP Extraction**: Packages selected files or folders from cached repository data without re-scanning the GitHub API.

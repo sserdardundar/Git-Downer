@@ -18,6 +18,7 @@ const {
   buildRawUrl,
   getRepoKey,
   fetchWithRetry,
+  resolveExcludedPaths,
 } = GitHubSmartDownloaderShared;
 
 const downloadJobs = new Map();
@@ -30,7 +31,6 @@ let latestJobSnapshot = null;
 const directoryCache = new Map();
 
 const CONFIG = {
-  COMPRESSION_TYPE: "STORE",
   BASE_API_URL: "https://api.github.com/repos",
   DEFAULT_CONCURRENCY: 25,
   RATE_LIMIT_DELAY: 1000,
@@ -125,6 +125,7 @@ function updateJobState(job, patch) {
 }
 
 function finishDownloadJob(job) {
+  if (!downloadJobs.has(job.id)) return; // idempotent — offscreen complete + action handler both call this
   latestJobSnapshot = { jobId: job.id, ...job.state };
   downloadJobs.delete(job.id);
 }
@@ -226,12 +227,29 @@ function updateProgress(job, status, message, progress = 0, details = {}) {
   }
 }
 
+// FileReader is not available in service workers; use arrayBuffer instead.
+async function blobToDataUrl(blob) {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 8192;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return `data:${blob.type};base64,${btoa(binary)}`;
+}
+
+// NOTE: triggerClientDownload is currently not called from any active download path.
+// All blob delivery is handled by offscreen.js via its own URL.createObjectURL flow.
+// If this function is ever activated: the `blob` sendMessage path below will silently
+// fail because Blobs are not serializable across extension message boundaries — they
+// arrive as {} in the content script. Use blobToDataUrl() for the fallback instead.
 async function triggerClientDownload(job, blob, filename) {
   if (job.tabId) {
     try {
       await chrome.tabs.sendMessage(job.tabId, {
         action: "triggerDownload",
-        blob: blob,
+        blob: blob,       // ⚠ Blobs are not message-serializable; see note above
         filename: filename,
       });
       return true;
@@ -359,13 +377,12 @@ function addToHistory(entry) {
   });
 }
 
-async function generateKey(passphrase) {
-  const enc = new TextEncoder();
-  // Fixed salt ensures deterministic key derivation from the unique machine UUID
-  const fixedSalt = new Uint8Array([
-    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
-  ]);
+// ─── Token encryption / decryption ───────────────────────────────────────────
+// Ciphertext format v2: 0x02 (version) + 16B random salt + 12B IV + ciphertext
+// Ciphertext format v1 (legacy): 12B IV + ciphertext  (fixed salt [1..16])
 
+async function generateKey(passphrase, salt) {
+  const enc = new TextEncoder();
   const baseKey = await crypto.subtle.importKey(
     "raw",
     enc.encode(passphrase),
@@ -376,7 +393,7 @@ async function generateKey(passphrase) {
   return crypto.subtle.deriveKey(
     {
       name: "PBKDF2",
-      salt: fixedSalt,
+      salt: salt,
       iterations: 100000,
       hash: "SHA-256",
     },
@@ -387,8 +404,30 @@ async function generateKey(passphrase) {
   );
 }
 
-async function decryptToken(key, data) {
+async function decryptTokenBlob(passphrase, data) {
+  // v2 format: "gsdv2:" string prefix + base64(salt[16] + iv[12] + ciphertext)
+  // The string prefix is an unambiguous discriminator — valid base64 never starts
+  // with "gsdv2:", eliminating the ~0.4% false-positive risk of a single-byte check.
+  if (data.startsWith("gsdv2:")) {
+    const combined = Uint8Array.from(atob(data.slice(6)), (c) => c.charCodeAt(0));
+    const salt = combined.slice(0, 16);
+    const iv = combined.slice(16, 28);
+    const ciphertext = combined.slice(28);
+    const key = await generateKey(passphrase, salt);
+    const dec = await crypto.subtle.decrypt(
+      { name: "AES-GCM", iv },
+      key,
+      ciphertext,
+    );
+    return new TextDecoder().decode(dec);
+  }
+
+  // v1 legacy format: base64(iv[12] + ciphertext), fixed salt
   const combined = Uint8Array.from(atob(data), (c) => c.charCodeAt(0));
+  const fixedSalt = new Uint8Array([
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+  ]);
+  const key = await generateKey(passphrase, fixedSalt);
   const iv = combined.slice(0, 12);
   const ciphertext = combined.slice(12);
   const dec = await crypto.subtle.decrypt(
@@ -399,16 +438,26 @@ async function decryptToken(key, data) {
   return new TextDecoder().decode(dec);
 }
 
-async function getEncryptionKey() {
+async function getEncryptionPassphrase() {
   return new Promise((resolve) => {
-    chrome.storage.local.get("tokenKeyMaterial", async (res) => {
-      let material = res.tokenKeyMaterial;
-      if (!material) {
-        material = crypto.randomUUID();
-        await chrome.storage.local.set({ tokenKeyMaterial: material });
+    // Migrate from local → sync if needed so cross-device decryption works
+    chrome.storage.local.get("tokenKeyMaterial", (localRes) => {
+      if (localRes.tokenKeyMaterial) {
+        const material = localRes.tokenKeyMaterial;
+        chrome.storage.sync.set({ tokenKeyMaterial: material }, () => {
+          chrome.storage.local.remove("tokenKeyMaterial");
+        });
+        resolve(material);
+        return;
       }
-      const key = await generateKey(material);
-      resolve(key);
+      chrome.storage.sync.get("tokenKeyMaterial", async (syncRes) => {
+        let material = syncRes.tokenKeyMaterial;
+        if (!material) {
+          material = crypto.randomUUID();
+          await chrome.storage.sync.set({ tokenKeyMaterial: material });
+        }
+        resolve(material);
+      });
     });
   });
 }
@@ -416,14 +465,16 @@ async function getEncryptionKey() {
 async function decryptStoredTokenOrThrow(encryptedToken) {
   if (!encryptedToken) return "";
   try {
-    const key = await getEncryptionKey();
-    return await decryptToken(key, encryptedToken);
+    const passphrase = await getEncryptionPassphrase();
+    return await decryptTokenBlob(passphrase, encryptedToken);
   } catch (error) {
     throw new Error(
       "GitHub token could not be decrypted. Re-enter it in Settings.",
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function refreshStoredRateLimit() {
   const settings = await chrome.storage.sync.get(DEFAULT_SETTINGS);
@@ -523,8 +574,6 @@ async function downloadDirectory(repoInfo, settings, job) {
     repoInfo: repoInfo,
     basePath: basePath,
     filename: filename,
-    compressionType: settings.zipCompressionLevel === 0 ? "STORE" : "DEFLATE",
-    compressionLevel: settings.zipCompressionLevel,
     token: token,
     jobId: job.id,
     mode: "scan_and_download",
@@ -566,8 +615,6 @@ async function downloadFilteredRepository(
     action: "generateZipAndDownload",
     excludedPaths: excludedTopLevelPaths,
     filename: filename,
-    compressionType: settings.zipCompressionLevel === 0 ? "STORE" : "DEFLATE",
-    compressionLevel: settings.zipCompressionLevel,
     jobId: job.id,
     repoInfo: repoInfo,
     token: token,
@@ -772,7 +819,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (action === "planStrategy") {
     chrome.storage.sync.get(["githubToken"], async (settings) => {
       const { repoInfo, input, jobId } = message;
-      const token = settings.githubToken;
+      // Must decrypt — settings.githubToken is the encrypted blob, not plaintext
+      let token = "";
+      try {
+        token = await decryptStoredTokenOrThrow(settings.githubToken || "");
+      } catch (_) {}
 
       let tempJob = null;
       if (jobId) {
@@ -834,16 +885,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         hasCachedArchive,
         isArchivePending,
         totalRepoSizeKb: repoSize,
-        compressionType:
-          settings.zipCompressionLevel === 0 ? "STORE" : "DEFLATE",
       });
 
       plan.resolvedRef = ref;
       plan.resolvedSize = repoSize;
-
-      if (tempJob) {
-        // Planning complete; job continues in next action
-      }
 
       sendResponse(plan);
     });
@@ -880,6 +925,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }));
     sendResponse({ success: true, jobs });
     return false;
+  }
+
+  if (action === "decryptToken") {
+    decryptStoredTokenOrThrow(message.encryptedToken)
+      .then((token) => sendResponse({ success: true, token }))
+      .catch(() => sendResponse({ success: false }));
+    return true;
   }
 
   if (action === "refreshRateLimit") {
@@ -922,7 +974,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           job,
           includedPaths,
         );
-        // downloadFilteredRepository handles finishing the job or delegating it
+        // finishDownloadJob will be called by the offscreenProgress complete handler
         sendResponse(result);
       } catch (error) {
         updateProgress(job, "error", error.message, 0);
@@ -940,6 +992,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, error: "Invalid GitHub URL" });
       return false;
     }
+
+    // Apply branch override from popup branch picker
+    if (message.branchOverride) {
+      repoInfo.ref = message.branchOverride;
+    }
+
+    // Exclusion paths passed from popup (resolved from active packs)
+    const excludedPaths = Array.isArray(message.excludedPaths)
+      ? message.excludedPaths
+      : [];
 
     chrome.storage.sync.get(DEFAULT_SETTINGS, async (settings) => {
       const job = createDownloadJob(
@@ -972,10 +1034,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         let result;
         if (!repoInfo.path || repoInfo.path === "") {
-          result = await downloadFullRepository(repoInfo, settings, job);
+          // Full repo: apply exclusions if any are active
+          if (excludedPaths.length > 0) {
+            result = await downloadFilteredRepository(
+              repoInfo,
+              settings,
+              excludedPaths,
+              job,
+              null,
+            );
+          } else {
+            result = await downloadFullRepository(repoInfo, settings, job);
+          }
         } else {
           result = await downloadDirectory(repoInfo, settings, job);
         }
+        // finishDownloadJob called by offscreenProgress complete handler; guard makes double-call safe
         finishDownloadJob(job);
         sendResponse({ ...result, jobId: job.id });
       } catch (error) {
@@ -1048,6 +1122,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             job,
             items.map((i) => i.path),
           );
+          // finishDownloadJob called by offscreenProgress complete handler
           finishDownloadJob(job);
           sendResponse({ ...result, jobId: job.id });
           return;
@@ -1063,13 +1138,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             download_url: item.download_url,
           })),
           filename: filename,
-          compressionType:
-            settings.zipCompressionLevel === 0 ? "STORE" : "DEFLATE",
-          compressionLevel: settings.zipCompressionLevel,
           token: settings.githubToken,
           jobId: job.id,
           mode: "scan_and_download_items",
         });
+        // finishDownloadJob called by offscreenProgress complete handler
         finishDownloadJob(job);
         sendResponse({ success: true, jobId: job.id });
       } catch (error) {

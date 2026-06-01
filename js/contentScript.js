@@ -9,7 +9,7 @@ const DEFAULT_SETTINGS = {
   themeMode: "system",
 };
 
-const PAGE_ONBOARDING_KEY = "gsdPageOnboardingDismissed";
+const PAGE_ONBOARDING_KEY = "gsdOnboardingDismissed";
 
 let buttonRenderNonce = 0;
 let downloadButton = null;
@@ -832,10 +832,15 @@ function maybeShowPageOnboarding() {
 
   if (!mainButton && !rowControl) return;
 
-  chrome.storage.local.get({ [PAGE_ONBOARDING_KEY]: false }, (result) => {
-    if (result[PAGE_ONBOARDING_KEY] || !isRepoPage()) return;
-    renderPageOnboarding(mainButton, rowControl);
-  });
+  chrome.storage.local.get(
+    { [PAGE_ONBOARDING_KEY]: false, gsdPageOnboardingDismissed: false },
+    (result) => {
+      const dismissed =
+        result[PAGE_ONBOARDING_KEY] || result.gsdPageOnboardingDismissed;
+      if (dismissed || !isRepoPage()) return;
+      renderPageOnboarding(mainButton, rowControl);
+    },
+  );
 }
 
 function renderPageOnboarding(mainButton, rowControl) {
